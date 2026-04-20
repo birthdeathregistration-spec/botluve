@@ -1,3 +1,4 @@
+import os
 import telebot
 import requests
 import json
@@ -14,12 +15,16 @@ from playwright.sync_api import sync_playwright
 # ==========================================
 # ১. কনফিগারেশন ও ইমেইল সেটআপ
 # ==========================================
-API_TOKEN = '8721977069:AAH2QA4mT4L57Cw9hqawOU4l1kSbND9au1Y'
-bot = telebot.TeleBot(API_TOKEN)
 
-EMAIL_SENDER = "mahfujahmed025@gmail.com" 
-EMAIL_PASSWORD = "keuu lllt mcfd afet" 
-EMAIL_RECEIVER = "mahfujahmed025@gmail.com" 
+# ১. সরাসরি টোকেন না লিখে নিচের মতো করে লিখুন
+# এটি Render-এর Environment Variable থেকে ডাটা খুঁজে নেবে
+API_TOKEN = os.environ.get('BOT_TOKEN')
+
+# ২. ইমেইল কনফিগারেশনও পরিবর্তন করুন
+EMAIL_SENDER = os.environ.get('EMAIL_USER')
+EMAIL_PASSWORD = os.environ.get('EMAIL_PASS') # এখানে সরাসরি পাসওয়ার্ড থাকবে না
+EMAIL_RECEIVER = os.environ.get('EMAIL_RECEIVER')
+
 
 session = requests.Session()
 vault = {
