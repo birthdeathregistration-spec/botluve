@@ -16,13 +16,15 @@ from playwright.sync_api import sync_playwright
 # ১. কনফিগারেশন ও ইমেইল সেটআপ
 # ==========================================
 
-# ১. সরাসরি টোকেন না লিখে নিচের মতো করে লিখুন
-# এটি Render-এর Environment Variable থেকে ডাটা খুঁজে নেবে
+# রেন্ডার থেকে টোকেন নেওয়া
 API_TOKEN = os.environ.get('BOT_TOKEN')
 
-# ২. ইমেইল কনফিগারেশনও পরিবর্তন করুন
+# 🔴 এই লাইনটি অবশ্যই যোগ করতে হবে (এটিই মিসিং ছিল)
+bot = telebot.TeleBot(API_TOKEN) 
+
+# ইমেইল কনফিগারেশন
 EMAIL_SENDER = os.environ.get('EMAIL_USER')
-EMAIL_PASSWORD = os.environ.get('EMAIL_PASS') # এখানে সরাসরি পাসওয়ার্ড থাকবে না
+EMAIL_PASSWORD = os.environ.get('EMAIL_PASS') 
 EMAIL_RECEIVER = os.environ.get('EMAIL_RECEIVER')
 
 
