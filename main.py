@@ -127,7 +127,7 @@ def role_step_1(m):
 
 def role_step_2(m):
     temp_storage[m.chat.id]['ch_otp'] = m.text
-    msg = bot.send_message(m.chat.id, "✅ OTP ওকে। এবার Secretary সেশন দিন (বট এটি ব্যবহার করবে):")
+    msg = bot.send_message(m.chat.id, "✅ OTP ওকে। এবার Secretary সেশন দিন:")
     bot.register_next_step_handler(msg, role_step_3)
 
 def role_step_3(m):
@@ -224,7 +224,7 @@ def main_menu():
 @bot.message_handler(func=lambda m: True)
 def router(m):
     t = m.text
-    if "/start" in t: bot.send_message(m.chat.id, "🚀 BDRIS Master Bot Active!", reply_markup=main_menu())
+    if "/start" in t: bot.send_message(m.chat.id, "🚀 BOOM Master Bot Active!", reply_markup=main_menu())
     elif t == "🔑 Admin Login":
         msg = bot.send_message(m.chat.id, "🔑 Admin সেশন দিন:", reply_markup=telebot.types.ReplyKeyboardRemove())
         bot.register_next_step_handler(msg, admin_login)
