@@ -11,16 +11,33 @@ from email.mime.text import MIMEText
 from datetime import datetime
 from urllib.parse import quote
 from playwright.sync_api import sync_playwright
+from flask import Flask
+from threading import Thread
 
 # ==========================================
-# ১. কনফিগারেশন ও ইমেইল সেটআপ
+# ১. ফ্লাস্ক সার্ভার ফিক্স (Render Port Binding)
 # ==========================================
+app = Flask('')
 
-# রেন্ডার থেকে টোকেন নেওয়া
+@app.route('/')
+def home():
+    return "BDRIS Bot is Live and Running!"
+
+def run():
+    # রেন্ডার এই PORT ভেরিয়েবলটি ব্যবহার করে সার্ভিস চেক করে
+    port = int(os.environ.get("PORT", 10000)) 
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive_web():
+    t = Thread(target=run)
+    t.start()
+
+# টোকেন ও বট সেটআপ
 API_TOKEN = os.environ.get('BOT_TOKEN')
+bot = telebot.TeleBot(API_TOKEN)
 
-# 🔴 এই লাইনটি অবশ্যই যোগ করতে হবে (এটিই মিসিং ছিল)
-bot = telebot.TeleBot(API_TOKEN) 
+# ফ্লাস্ক স্টার্ট (এটি bot.polling এর আগে থাকতে হবে)
+keep_alive_web()
 
 # ইমেইল কনফিগারেশন
 EMAIL_SENDER = os.environ.get('EMAIL_USER')
