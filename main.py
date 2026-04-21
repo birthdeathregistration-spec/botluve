@@ -237,7 +237,7 @@ def router(m):
         elif t == "🔄 Reprint": handle_category_init(m, 'repr')
         elif t == "🏠 Dashboard": 
             if navigate_to("https://bdris.gov.bd/admin/")[0]: bot.reply_to(m, "🏠 ড্যাশবোর্ড রিফ্রেশড।")
-        elif t == "🌐 Advanced Search":
+        elif t == "🌐 Search By Name":
             markup = telebot.types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True).add("Bangla", "English")
             msg = bot.send_message(m.chat.id, "🌐 ভাষা নির্বাচন করুন:", reply_markup=markup)
             bot.register_next_step_handler(msg, step_adv_lang)
@@ -283,3 +283,20 @@ def callback_handler(call):
 # Keep Alive
 threading.Thread(target=lambda: (time.sleep(240), navigate_to("https://bdris.gov.bd/admin/")), daemon=True).start()
 bot.polling(none_stop=True)
+
+# কোডের বাকি সব ফাংশন শেষ হওয়ার পর একদম নিচে এটি লিখুন
+
+if __name__ == "__main__":
+    # ১. প্রথমে ফ্লাস্ক সার্ভার চালু হবে (ব্যাকগ্রাউন্ডে)
+    keep_alive_web() 
+    
+    print("✅ Web Server started!")
+    print("🚀 Telegram Bot is starting...")
+    
+    # ২. এরপর টেলিগ্রাম বট মেসেজ শোনার জন্য তৈরি হবে
+    try:
+        bot.infinity_polling(timeout=10, long_polling_timeout=5)
+    except Exception as e:
+        print(f"❌ Bot Polling Error: {e}")
+        time.sleep(5)
+
