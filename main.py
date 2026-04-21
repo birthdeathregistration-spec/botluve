@@ -33,7 +33,7 @@ bot = telebot.TeleBot(API_TOKEN)
 # ২. ইউজার সেশন ম্যানেজমেন্ট (মাল্টি-ইউজার সাপোর্ট)
 # ==========================================
 user_sessions = {}
-ID_CACHE = {}  
+# ID_CACHE = {}  <-- এটি মুছে ফেলো
 
 def get_session(chat_id):
     if chat_id not in user_sessions:
@@ -46,9 +46,11 @@ def get_session(chat_id):
             "app_start": 0,
             "app_length": 5,
             "sharok_no": 1,
-            "temp_data": {} 
+            "temp_data": {},
+            "id_cache": {} # <-- নতুন ক্যাশ যুক্ত করা হলো
         }
     return user_sessions[chat_id]
+
 
 # ==========================================
 # ৩. ফ্লাস্ক সার্ভার (Render Port Binding)
@@ -460,8 +462,9 @@ def fetch_list_ui(message, cmd, is_search):
             enc_id = item.get('encryptedId')
             status = str(item.get('status', '')).upper()
             
-            short_id = str(hash(enc_id))[-8:]
-            ID_CACHE[short_id] = enc_id
+                        short_id = str(hash(enc_id))[-8:]
+            u_sess["id_cache"][short_id] = enc_id
+
             
             msg_text += f"🆔 `{app_id}` | {item.get('personNameBn', 'N/A')}\n🚩 Status: `{status}`\n"
             
@@ -570,12 +573,14 @@ def process_adv_search(m, lang):
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     chat_id = call.message.chat.id
-    u_sess = get_session(chat_id)
+    u_sess = get_session(chat_id) # ইউজারের সেশন কল করা হলো
     
     data_parts = call.data.split('_')
     action = data_parts[0]
     short_id = data_parts[1] if len(data_parts) > 1 else ""
-    enc_id = ID_CACHE.get(short_id)
+    
+    # নতুন নিয়মে ইউজারের নিজস্ব ক্যাশ থেকে enc_id নেওয়া হচ্ছে
+    enc_id = u_sess["id_cache"].get(short_id)
     
     if action in ["next", "prev"]:
         cmd = short_id
@@ -584,6 +589,9 @@ def callback_handler(call):
         fetch_list_ui(call.message, cmd, False)
         
     elif action == "pay":
+        if not enc_id:
+            return bot.answer_callback_query(call.id, "❌ আইডি পাওয়া যায়নি, আবার ট্রাই করুন।")
+        
         payload = {
             'data': enc_id, 
             'chalanPaymentType': 'CASH', 
@@ -608,6 +616,9 @@ def callback_handler(call):
         bot.send_message(chat_id, "✅ আবেদন রিসিভ সম্পন্ন হয়েছে!")
         
     elif action == "png":
+        if not enc_id:
+            return bot.answer_callback_query(call.id, "❌ আইডি পাওয়া যায়নি।")
+            
         wait = bot.send_message(chat_id, "⏳ ছবি তৈরি হচ্ছে...")
         try:
             with sync_playwright() as p:
@@ -630,6 +641,7 @@ def callback_handler(call):
         except Exception as e: 
             logging.error(f"[{chat_id}] PNG Error: {e}")
             bot.edit_message_text(f"❌ PNG তৈরি করতে সমস্যা হয়েছে।", chat_id, wait.message_id)
+
 
 # ==========================================
 # ১০. বট রান (থ্রেডিং)
