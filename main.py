@@ -148,12 +148,13 @@ def is_cancel(m):
 def main_menu():
     markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.row("📋 Applications", "📝 Correction", "🔄 Reprint")
-    markup.row("🏠 Dashboard", "🌐 Search By Name", "👨‍👩‍👦 পিতা-মাতার UBRN হালনাগাদ") 
+    markup.row("🏠 Dashboard", "🌐 Search By Name", "🔢 Search By UBRN") 
+    markup.row("👨‍👩‍👦 পিতা-মাতার UBRN হালনাগাদ")
     markup.row("🔑 Admin Login", "🔑 Role Login (CH/SEC)")
     return markup
 
 # ==========================================
-# ৫. লগইন সিস্টেম (সরাসরি আপনার আগের লজিক)
+# ৫. লগইন সিস্টেম (অ্যাডমিন এবং রোল)
 # ==========================================
 def admin_login(m):
     if is_cancel(m): return
@@ -197,11 +198,12 @@ def role_step_1(m):
         try: bot.delete_message(chat_id, wait_msg.message_id) 
         except: pass
         
-        if "Logout" in res.text:
+        # এখানে চেয়ারম্যানের জন্য "নিবন্ধনক" চেক করা হলো
+        if "নিবন্ধনক" in res.text:
             msg = bot.send_message(chat_id, "✅ চেয়ারম্যান সেশন ভ্যালিড! এখন OTP প্রদান করুন:")
             bot.register_next_step_handler(msg, role_step_2)
         else:
-            msg = bot.send_message(chat_id, "❌ চেয়ারম্যান সেশনটি ইনভ্যালিড! আবার সঠিক সেশন দিন:")
+            msg = bot.send_message(chat_id, "❌ চেয়ারম্যান সেশনটি ইনভ্যালিড ('নিবন্ধনক' পাওয়া যায়নি)! আবার সঠিক সেশন দিন:")
             bot.register_next_step_handler(msg, role_step_1)
             
     except Exception as e:
@@ -465,8 +467,9 @@ def fetch_list_ui(message, cmd, is_search):
         bot.send_message(chat_id, "❌ ডাটা লোড হয়নি। সার্ভার এরর।")
 
 # ==========================================
-# ৮. অ্যাডভান্সড সার্চ (Search By Name)
+# ৮. সার্চ বাই নেম এবং UBRN সার্চ
 # ==========================================
+
 def step_adv_lang(m):
     if is_cancel(m): return
     lang = 'BENGALI' if "Bangla" in m.text else 'ENGLISH'
@@ -493,6 +496,31 @@ def process_adv_search(m, lang):
             bot.send_message(chat_id, f"📊 **Search Result:**\n```json\n{json_data}\n```", parse_mode='Markdown', reply_markup=main_menu())
         except Exception: 
             bot.send_message(chat_id, f"Raw Data: {res.text}", reply_markup=main_menu())
+
+def search_by_ubrn_step(m):
+    if is_cancel(m): return
+    chat_id = m.chat.id
+    ubrn = m.text.strip()
+    
+    wait_msg = bot.send_message(chat_id, "⏳ তথ্য খোঁজা হচ্ছে...")
+    url = f"https://bdris.gov.bd/api/br/info/person-info-with-nationality-by-ubrn-and-data-group/{ubrn}?data-group=personInParentsUbrnUpdate"
+    res = call_api(chat_id, url)
+    
+    try: bot.delete_message(chat_id, wait_msg.message_id)
+    except: pass
+    
+    if res and res.status_code == 200:
+        try:
+            json_data = json.dumps(res.json(), indent=2, ensure_ascii=False)
+            bot.send_message(chat_id, f"📊 **UBRN Search Result:**\n```json\n{json_data}\n```", parse_mode='Markdown')
+        except Exception:
+            bot.send_message(chat_id, f"Raw Data:\n```json\n{res.text}\n```", parse_mode='Markdown')
+    else:
+        bot.send_message(chat_id, "❌ কোনো তথ্য পাওয়া যায়নি বা UBRN ভুল।")
+        
+    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True).add("🏠 Back to Menu")
+    msg = bot.send_message(chat_id, "🔍 অন্য কোনো UBRN খুঁজতে নম্বর দিন, অথবা মেনুতে ফিরুন:", reply_markup=markup)
+    bot.register_next_step_handler(msg, search_by_ubrn_step)
 
 # ==========================================
 # ৯. কলব্যাক হ্যান্ডলার (Pay, PNG, Receive)
@@ -588,12 +616,12 @@ def router(m):
         
     elif t == "🔑 Admin Login":
         markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True).add("🏠 Back to Menu")
-        msg = bot.send_message(chat_id, "🔑 Admin এর সমস্ত কুকি কপি করে দিন:", reply_markup=markup)
+        msg = bot.send_message(chat_id, "🔑 Admin সেশন দিন (SESSION এবং TS0108b707):", reply_markup=markup)
         bot.register_next_step_handler(msg, admin_login)
         
     elif t == "🔑 Role Login (CH/SEC)":
         markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True).add("🏠 Back to Menu")
-        msg = bot.send_message(chat_id, "👤 চেয়ারম্যান (Chairman) এর সমস্ত কুকি দিন:", reply_markup=markup)
+        msg = bot.send_message(chat_id, "👤 চেয়ারম্যান (Chairman) সেশনটি দিন:", reply_markup=markup)
         bot.register_next_step_handler(msg, role_step_1)
         
     elif u_sess["is_alive"]:
@@ -607,6 +635,10 @@ def router(m):
             markup = telebot.types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True).add("Bangla", "English", "🏠 Back to Menu")
             msg = bot.send_message(chat_id, "🌐 ভাষা নির্বাচন করুন:", reply_markup=markup)
             bot.register_next_step_handler(msg, step_adv_lang)
+        elif t == "🔢 Search By UBRN":
+            markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True).add("🏠 Back to Menu")
+            msg = bot.send_message(chat_id, "🔢 ১৭ ডিজিটের জন্ম নিবন্ধন নম্বর (UBRN) দিন:", reply_markup=markup)
+            bot.register_next_step_handler(msg, search_by_ubrn_step)
         elif t == "👨‍👩‍👦 পিতা-মাতার UBRN হালনাগাদ":
             start_ubrn_flow(m)
     else: 
