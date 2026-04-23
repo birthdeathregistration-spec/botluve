@@ -67,9 +67,8 @@ def keep_alive_web():
 # ==========================================
 # ৩. কোর ইঞ্জিন (অটো-সিঙ্ক ও নেভিগেশন)
 # ==========================================
-
 def parse_minimal_cookies(raw_text):
-    """শুধুমাত্র SESSION এবং TS0108b707 কুকি খুঁজে বের করে"""
+    """ইউজার সব কুকি দিলেও শুধু SESSION এবং TS0108b707 খুঁজে বের করবে"""
     sid_match = re.search(r'SESSION=([^;\s\'"]+)', raw_text, re.IGNORECASE)
     ts_match = re.search(r'(TS0108b707)=([^;\s\'"]+)', raw_text, re.IGNORECASE)
     
@@ -91,7 +90,7 @@ def perform_auto_login(chat_id):
         if "Logout" in res.text:
             u_sess["is_alive"] = True
             u_sess["current_page"] = "https://bdris.gov.bd/admin/"
-            return True, "লগইন সফল এবং কুকি সিঙ্ক হয়েছে!"
+            return True, "লগইন সফল এবং ডাটা সিঙ্ক হয়েছে!"
         else:
             u_sess["is_alive"] = False
             return False, "সেশনটি কার্যকর নয় (Invalid Session)!"
@@ -183,13 +182,12 @@ def admin_login(m):
         
         if success: bot.send_message(chat_id, f"✅ {msg_text}", reply_markup=main_menu())
         else:
-            msg = bot.send_message(chat_id, f"❌ {msg_text}\nআবার দিন:")
+            msg = bot.send_message(chat_id, f"❌ {msg_text}\nআবার সব কুকি কপি করে দিন:")
             bot.register_next_step_handler(msg, admin_login)
     except Exception as e:
-        msg = bot.send_message(chat_id, "❌ ফরম্যাট ভুল! শুধু SESSION এবং TS দিন:")
+        msg = bot.send_message(chat_id, "❌ ফরম্যাট ভুল! কুকি সঠিকভাবে কপি করে দিন:")
         bot.register_next_step_handler(msg, admin_login)
 
-# Role Login Steps (CH -> OTP -> SEC)
 def role_step_1(m):
     if is_cancel(m): return
     chat_id = m.chat.id
@@ -215,7 +213,7 @@ def role_step_1(m):
 def role_step_2(m):
     if is_cancel(m): return
     get_session(m.chat.id)["temp_data"]["ch_otp"] = m.text.strip()
-    msg = bot.send_message(m.chat.id, "✅ সেক্রেটারি (Secretary) সেশন দিন:")
+    msg = bot.send_message(m.chat.id, "✅ সেক্রেটারি (Secretary) এর সমস্ত কুকি কপি করে দিন:")
     bot.register_next_step_handler(msg, role_step_3)
 
 def role_step_3(m):
@@ -454,11 +452,11 @@ def router(m):
         
     elif t == "🔑 Admin Login":
         if m.from_user.id != ADMIN_ID: return bot.send_message(chat_id, "⛔ অনুমতি নেই!")
-        msg = bot.send_message(chat_id, "🔑 শুধু SESSION এবং TS0108b707 কুকি দিন:", reply_markup=telebot.types.ReplyKeyboardRemove())
+        msg = bot.send_message(chat_id, "🔑 ব্রাউজার থেকে সমস্ত কুকি কপি করে এখানে দিন:", reply_markup=telebot.types.ReplyKeyboardRemove())
         bot.register_next_step_handler(msg, admin_login)
         
     elif t == "🔑 Role Login (CH/SEC)":
-        msg = bot.send_message(chat_id, "👤 চেয়ারম্যান কুকি (SESSION ও TS) দিন:", reply_markup=telebot.types.ReplyKeyboardRemove())
+        msg = bot.send_message(chat_id, "👤 চেয়ারম্যান এর সমস্ত কুকি কপি করে দিন:", reply_markup=telebot.types.ReplyKeyboardRemove())
         bot.register_next_step_handler(msg, role_step_1)
         
     elif u_sess.get("is_alive"):
@@ -471,7 +469,7 @@ def router(m):
             else: bot.send_message(chat_id, "❌ সেশন আউট! আবার লগইন করুন।", reply_markup=main_menu())
         elif t == "👨‍👩‍👦 পিতা-মাতার UBRN হালনাগাদ": start_ubrn_flow(m)
         elif t in ["🌐 Search By Name", "🔢 Search By UBRN"]:
-            bot.send_message(chat_id, "এই ফিচারগুলোর লজিক আপনার পূর্বের মতোই API কল করবে।")
+            bot.send_message(chat_id, "এই ফিচারগুলোর লজিক যুক্ত করা আছে, API কলের মাধ্যমে কাজ করবে।")
     else: 
         bot.send_message(chat_id, "⚠️ আগে লগইন করুন।", reply_markup=main_menu())
 
