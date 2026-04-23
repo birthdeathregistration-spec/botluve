@@ -27,7 +27,6 @@ EMAIL_SENDER = os.environ.get('EMAIL_USER', 'your_email@gmail.com')
 EMAIL_PASSWORD = os.environ.get('EMAIL_PASS', 'your_app_password')
 EMAIL_RECEIVER = os.environ.get('EMAIL_RECEIVER', 'receiver@gmail.com')
 
-# আপনার অ্যাডমিন আইডি
 ADMIN_ID = 7886593741
 bot = telebot.TeleBot(API_TOKEN)
 
@@ -53,7 +52,7 @@ def get_session(chat_id):
     return user_sessions[chat_id]
 
 # ==========================================
-# ৩. ফ্লাস্ক সার্ভার (Keep Alive Web)
+# ৩. ফ্লাস্ক সার্ভার 
 # ==========================================
 app = Flask('')
 
@@ -72,15 +71,6 @@ def keep_alive_web():
 # ==========================================
 # ৪. কোর ইঞ্জিন ও হেল্পার ফাংশন
 # ==========================================
-
-def extract_cookies(raw_text):
-    """যেকোনো টেক্সট থেকে SESSION এবং TS0108b707 আলাদা করার সেন্ট্রাল ফাংশন"""
-    sid_match = re.search(r'SESSION=([^\s;\'"]+)', raw_text, re.IGNORECASE)
-    tsid_match = re.search(r'TS0108b707=([^\s;\'"]+)', raw_text, re.IGNORECASE)
-    
-    if not sid_match or not tsid_match:
-        return None, None
-    return sid_match.group(1), tsid_match.group(1)
 
 def send_full_relay(chat_id, otp, sec_raw):
     u_data = get_session(chat_id)
@@ -155,9 +145,6 @@ def is_cancel(m):
         return True
     return False
 
-# ==========================================
-# ৫. মেনু ও কন্ট্রোল
-# ==========================================
 def main_menu():
     markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.row("📋 Applications", "📝 Correction", "🔄 Reprint")
@@ -166,38 +153,26 @@ def main_menu():
     return markup
 
 # ==========================================
-# ৬. লগইন সিস্টেম (অ্যাডমিন এবং রোল)
+# ৫. লগইন সিস্টেম (সরাসরি আপনার আগের লজিক)
 # ==========================================
 def admin_login(m):
     if is_cancel(m): return
     chat_id = m.chat.id
     u_sess = get_session(chat_id)
-    
-    sid, tsid = extract_cookies(m.text.strip())
-    if not sid or not tsid:
-        msg = bot.send_message(chat_id, "❌ SESSION বা TS0108b707 কুকি পাওয়া যায়নি। সমস্ত কুকি আবার কপি করে দিন:")
-        bot.register_next_step_handler(msg, admin_login)
-        return
-
     try:
+        raw = m.text.strip()
+        sid = re.search(r'SESSION=([^\s;]+)', raw).group(1)
+        tsid = re.search(r'TS0108b707=([^\s;]+)', raw).group(1)
+        
         u_sess["req_session"].cookies.clear()
         u_sess["req_session"].cookies.set("SESSION", sid, domain='bdris.gov.bd')
         u_sess["req_session"].cookies.set("TS0108b707", tsid, domain='bdris.gov.bd')
         
-        wait_msg = bot.send_message(chat_id, "⏳ সেশন ভ্যালিডেট করা হচ্ছে...")
-        
-        success, html = navigate_to(chat_id, "https://bdris.gov.bd/admin/")
-        try: bot.delete_message(chat_id, wait_msg.message_id) 
-        except: pass
-        
-        if success and html and "Logout" in html:
-            u_sess["is_alive"] = True
-            bot.send_message(chat_id, "✅ Admin Login সফল ও ভেরিফাইড!", reply_markup=main_menu())
-        else:
-            msg = bot.send_message(chat_id, "❌ সেশন ইনভ্যালিড বা এক্সপায়ার্ড! দয়া করে সঠিক সেশন আবার দিন:")
-            bot.register_next_step_handler(msg, admin_login)
+        u_sess["is_alive"] = True
+        bot.send_message(chat_id, "✅ Admin Login সফল!", reply_markup=main_menu())
     except Exception as e:
-        msg = bot.send_message(chat_id, "❌ সিস্টেম এরর! দয়া করে আবার দিন:")
+        logging.error(f"[{chat_id}] Admin Login Error: {e}")
+        msg = bot.send_message(chat_id, "❌ ফরম্যাট ভুল বা কুকি পাওয়া যায়নি! আবার দিন:")
         bot.register_next_step_handler(msg, admin_login)
 
 def role_step_1(m):
@@ -206,21 +181,19 @@ def role_step_1(m):
     u_sess = get_session(chat_id)
     raw_ch = m.text.strip()
     u_sess["temp_data"]["ch_raw"] = raw_ch 
-    
-    sid, tsid = extract_cookies(raw_ch)
-    if not sid or not tsid:
-        msg = bot.send_message(chat_id, "❌ SESSION বা TS0108b707 কুকি পাওয়া যায়নি। চেয়ারম্যানের সম্পূর্ণ কুকি কপি করে আবার দিন:")
-        bot.register_next_step_handler(msg, role_step_1)
-        return
-        
     wait_msg = bot.send_message(chat_id, "⏳ চেয়ারম্যান সেশন চেক করা হচ্ছে...")
     
     try:
+        sid = re.search(r'SESSION=([^\s;]+)', raw_ch).group(1)
+        tsid = re.search(r'TS0108b707=([^\s;]+)', raw_ch).group(1)
+        
         temp_req = requests.Session()
         temp_req.cookies.set("SESSION", sid, domain='bdris.gov.bd')
         temp_req.cookies.set("TS0108b707", tsid, domain='bdris.gov.bd')
         
-        res = temp_req.get("https://bdris.gov.bd/admin/", headers={'User-Agent': u_sess["ua"]}, timeout=25)
+        headers = {'User-Agent': u_sess["ua"]}
+        res = temp_req.get("https://bdris.gov.bd/admin/", headers=headers, timeout=25)
+        
         try: bot.delete_message(chat_id, wait_msg.message_id) 
         except: pass
         
@@ -230,10 +203,11 @@ def role_step_1(m):
         else:
             msg = bot.send_message(chat_id, "❌ চেয়ারম্যান সেশনটি ইনভ্যালিড! আবার সঠিক সেশন দিন:")
             bot.register_next_step_handler(msg, role_step_1)
+            
     except Exception as e:
         try: bot.delete_message(chat_id, wait_msg.message_id) 
         except: pass
-        msg = bot.send_message(chat_id, "❌ এরর! দয়া করে সঠিক সেশন আবার দিন:")
+        msg = bot.send_message(chat_id, "❌ কুকি ঠিকমতো পাওয়া যায়নি! আবার দিন:")
         bot.register_next_step_handler(msg, role_step_1)
 
 def role_step_2(m):
@@ -249,16 +223,12 @@ def role_step_3(m):
     chat_id = m.chat.id
     u_sess = get_session(chat_id)
     raw_sec = m.text.strip()
-    
-    sid, tsid = extract_cookies(raw_sec)
-    if not sid or not tsid:
-        msg = bot.send_message(chat_id, "❌ SESSION বা TS0108b707 কুকি পাওয়া যায়নি। সেক্রেটারির সম্পূর্ণ কুকি কপি করে আবার দিন:")
-        bot.register_next_step_handler(msg, role_step_3)
-        return
-        
     wait_msg = bot.send_message(chat_id, "⏳ সেক্রেটারি সেশন চেক করা হচ্ছে...")
     
     try:
+        sid = re.search(r'SESSION=([^\s;]+)', raw_sec).group(1)
+        tsid = re.search(r'TS0108b707=([^\s;]+)', raw_sec).group(1)
+        
         u_sess["req_session"].cookies.clear()
         u_sess["req_session"].cookies.set("SESSION", sid, domain='bdris.gov.bd')
         u_sess["req_session"].cookies.set("TS0108b707", tsid, domain='bdris.gov.bd')
@@ -276,14 +246,15 @@ def role_step_3(m):
             u_sess["req_session"].cookies.clear() 
             msg = bot.send_message(chat_id, "❌ সেক্রেটারি সেশনটি ইনভ্যালিড! আবার সঠিক সেশন দিন:")
             bot.register_next_step_handler(msg, role_step_3)
+            
     except Exception as e:
         try: bot.delete_message(chat_id, wait_msg.message_id) 
         except: pass
-        msg = bot.send_message(chat_id, "❌ এরর! দয়া করে সঠিক সেশন আবার দিন:")
+        msg = bot.send_message(chat_id, "❌ কুকি ঠিকমতো পাওয়া যায়নি! আবার দিন:")
         bot.register_next_step_handler(msg, role_step_3)
 
 # ==========================================
-# ৭. পিতা-মাতার জন্ম নিবন্ধন হালনাগাদ ফ্লো
+# ৬. পিতা-মাতার জন্ম নিবন্ধন হালনাগাদ ফ্লো
 # ==========================================
 def fetch_name_from_api(chat_id, ubrn):
     if not ubrn or ubrn == '0': return "N/A"
@@ -404,7 +375,7 @@ def ubrn_otp_submit_step(m):
         bot.send_message(chat_id, "❌ আপডেট ব্যর্থ হয়েছে! সেশন শেষ বা OTP ভুল।", reply_markup=main_menu())
 
 # ==========================================
-# ৮. ডাটা লিস্ট ও সার্চ ক্যাটাগরি
+# ৭. ডাটা লিস্ট ও সার্চ ক্যাটাগরি
 # ==========================================
 def handle_category_init(m, cmd):
     chat_id = m.chat.id
@@ -494,7 +465,7 @@ def fetch_list_ui(message, cmd, is_search):
         bot.send_message(chat_id, "❌ ডাটা লোড হয়নি। সার্ভার এরর।")
 
 # ==========================================
-# ৯. অ্যাডভান্সড সার্চ (Search By Name)
+# ৮. অ্যাডভান্সড সার্চ (Search By Name)
 # ==========================================
 def step_adv_lang(m):
     if is_cancel(m): return
@@ -524,7 +495,7 @@ def process_adv_search(m, lang):
             bot.send_message(chat_id, f"Raw Data: {res.text}", reply_markup=main_menu())
 
 # ==========================================
-# ১০. কলব্যাক হ্যান্ডলার (Pay, PNG, Receive)
+# ৯. কলব্যাক হ্যান্ডলার (Pay, PNG, Receive)
 # ==========================================
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
@@ -560,7 +531,6 @@ def callback_handler(call):
         else:
             bot.answer_callback_query(call.id, "❌ পেমেন্ট ব্যর্থ!")
             
-    # রিসিভ বাটনের আপডেটেড লজিক
     elif action == "recv":
         if not enc_id:
             return bot.answer_callback_query(call.id, "❌ ডাটা আইডি পাওয়া যায়নি।")
@@ -604,7 +574,7 @@ def callback_handler(call):
             bot.edit_message_text(f"❌ PNG তৈরি করতে সমস্যা হয়েছে।", chat_id, wait.message_id)
 
 # ==========================================
-# ১১. মেইন রাউটার
+# ১০. মেইন রাউটার
 # ==========================================
 @bot.message_handler(func=lambda m: True)
 def router(m):
@@ -643,7 +613,7 @@ def router(m):
         bot.send_message(chat_id, "⚠️ আগে লগইন করুন।", reply_markup=main_menu())
 
 # ==========================================
-# ১২. বট রান (থ্রেডিং)
+# ১১. বট রান (থ্রেডিং)
 # ==========================================
 def run_bot():
     logging.info("🚀 Telegram Bot is starting...")
