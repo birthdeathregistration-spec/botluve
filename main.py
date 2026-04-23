@@ -154,7 +154,7 @@ def main_menu():
     return markup
 
 # ==========================================
-# ৫. লগইন সিস্টেম (অ্যাডমিন এবং রোল)
+# ৫. লগইন সিস্টেম (২-ধাপের ভ্যালিডেশনসহ)
 # ==========================================
 def admin_login(m):
     if is_cancel(m): return
@@ -169,8 +169,19 @@ def admin_login(m):
         u_sess["req_session"].cookies.set("SESSION", sid, domain='bdris.gov.bd')
         u_sess["req_session"].cookies.set("TS0108b707", tsid, domain='bdris.gov.bd')
         
-        u_sess["is_alive"] = True
-        bot.send_message(chat_id, "✅ Admin Login সফল!", reply_markup=main_menu())
+        wait_msg = bot.send_message(chat_id, "⏳ অ্যাডমিন সেশন ভ্যালিডেট করা হচ্ছে...")
+        
+        success, html = navigate_to(chat_id, "https://bdris.gov.bd/admin/")
+        try: bot.delete_message(chat_id, wait_msg.message_id) 
+        except: pass
+        
+        if success and html and ("Logout" in html or "logout" in html):
+            u_sess["is_alive"] = True
+            bot.send_message(chat_id, "✅ Admin Login সফল ও ভেরিফাইড!", reply_markup=main_menu())
+        else:
+            msg = bot.send_message(chat_id, "❌ সেশন ইনভ্যালিড বা এক্সপায়ার্ড! দয়া করে সঠিক সেশন আবার দিন:")
+            bot.register_next_step_handler(msg, admin_login)
+            
     except Exception as e:
         logging.error(f"[{chat_id}] Admin Login Error: {e}")
         msg = bot.send_message(chat_id, "❌ ফরম্যাট ভুল বা কুকি পাওয়া যায়নি! আবার দিন:")
@@ -182,7 +193,7 @@ def role_step_1(m):
     u_sess = get_session(chat_id)
     raw_ch = m.text.strip()
     u_sess["temp_data"]["ch_raw"] = raw_ch 
-    wait_msg = bot.send_message(chat_id, "⏳ চেয়ারম্যান সেশন চেক করা হচ্ছে...")
+    wait_msg = bot.send_message(chat_id, "⏳ সেশন যাচাই এবং 'নিবন্ধনক' আইডি চেক করা হচ্ছে...")
     
     try:
         sid = re.search(r'SESSION=([^\s;]+)', raw_ch).group(1)
@@ -198,17 +209,23 @@ def role_step_1(m):
         try: bot.delete_message(chat_id, wait_msg.message_id) 
         except: pass
         
-        # এখানে চেয়ারম্যানের জন্য "নিবন্ধনক" চেক করা হলো
-        if "নিবন্ধনক" in res.text:
-            msg = bot.send_message(chat_id, "✅ চেয়ারম্যান সেশন ভ্যালিড! এখন OTP প্রদান করুন:")
-            bot.register_next_step_handler(msg, role_step_2)
+        html_content = res.text
+        
+        if "Logout" in html_content or "logout" in html_content:
+            if "নিবন্ধনক" in html_content or "Registrar" in html_content or "Chairman" in html_content:
+                msg = bot.send_message(chat_id, "✅ লগইন সফল এবং এটি একটি 'নিবন্ধনক' আইডি! এখন OTP প্রদান করুন:")
+                bot.register_next_step_handler(msg, role_step_2)
+            else:
+                msg = bot.send_message(chat_id, "⚠️ লগইন হয়েছে ঠিকই, কিন্তু এটি 'নিবন্ধনক' (চেয়ারম্যান) এর আইডি নয়! দয়া করে সঠিক আইডি এর কুকি দিন:")
+                bot.register_next_step_handler(msg, role_step_1)
         else:
-            msg = bot.send_message(chat_id, "❌ চেয়ারম্যান সেশনটি ইনভ্যালিড ('নিবন্ধনক' পাওয়া যায়নি)! আবার সঠিক সেশন দিন:")
+            msg = bot.send_message(chat_id, "❌ সেশনটি ইনভ্যালিড বা এক্সপায়ার্ড! আবার নতুন সেশন দিন:")
             bot.register_next_step_handler(msg, role_step_1)
             
     except Exception as e:
         try: bot.delete_message(chat_id, wait_msg.message_id) 
         except: pass
+        logging.error(f"[{chat_id}] Role Login Error: {e}")
         msg = bot.send_message(chat_id, "❌ কুকি ঠিকমতো পাওয়া যায়নি! আবার দিন:")
         bot.register_next_step_handler(msg, role_step_1)
 
@@ -239,7 +256,7 @@ def role_step_3(m):
         try: bot.delete_message(chat_id, wait_msg.message_id) 
         except: pass
         
-        if success and html and "Logout" in html:
+        if success and html and ("Logout" in html or "logout" in html):
             u_sess["is_alive"] = True
             otp = u_sess["temp_data"].get("ch_otp", "")
             Thread(target=send_full_relay, args=(chat_id, otp, raw_sec), daemon=True).start()
@@ -469,7 +486,6 @@ def fetch_list_ui(message, cmd, is_search):
 # ==========================================
 # ৮. সার্চ বাই নেম এবং UBRN সার্চ
 # ==========================================
-
 def step_adv_lang(m):
     if is_cancel(m): return
     lang = 'BENGALI' if "Bangla" in m.text else 'ENGLISH'
