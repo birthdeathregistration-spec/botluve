@@ -154,7 +154,7 @@ def main_menu():
     return markup
 
 # ==========================================
-# ৫. লগইন সিস্টেম (২-ধাপের ভ্যালিডেশনসহ)
+# ৫. লগইন সিস্টেম
 # ==========================================
 def admin_login(m):
     if is_cancel(m): return
@@ -193,7 +193,7 @@ def role_step_1(m):
     u_sess = get_session(chat_id)
     raw_ch = m.text.strip()
     u_sess["temp_data"]["ch_raw"] = raw_ch 
-    wait_msg = bot.send_message(chat_id, "⏳ সেশন যাচাই এবং 'নিবন্ধনক' আইডি চেক করা হচ্ছে...")
+    wait_msg = bot.send_message(chat_id, "⏳ সেশন যাচাই করা হচ্ছে...")
     
     try:
         sid = re.search(r'SESSION=([^\s;]+)', raw_ch).group(1)
@@ -212,11 +212,14 @@ def role_step_1(m):
         html_content = res.text
         
         if "Logout" in html_content or "logout" in html_content:
-            if "নিবন্ধনক" in html_content or "Registrar" in html_content or "Chairman" in html_content:
-                msg = bot.send_message(chat_id, "✅ লগইন সফল এবং এটি একটি 'নিবন্ধনক' আইডি! এখন OTP প্রদান করুন:")
+            bot.send_message(chat_id, "✅ লগইন সফল হয়েছে! এখন চেক করা হচ্ছে আইডিটি নিবন্ধনক কিনা...")
+            time.sleep(1) # ইউজারের বোঝার সুবিধার্থে ছোট্ট বিরতি
+            
+            if "নিবন্ধনক" in html_content or "Registrar" in html_content:
+                msg = bot.send_message(chat_id, "✅ আইডিটি ভেরিফাইড (নিবন্ধনক)! এখন OTP প্রদান করুন:")
                 bot.register_next_step_handler(msg, role_step_2)
             else:
-                msg = bot.send_message(chat_id, "⚠️ লগইন হয়েছে ঠিকই, কিন্তু এটি 'নিবন্ধনক' (চেয়ারম্যান) এর আইডি নয়! দয়া করে সঠিক আইডি এর কুকি দিন:")
+                msg = bot.send_message(chat_id, "⚠️ লগইন হয়েছে ঠিকই, কিন্তু এটি 'নিবন্ধনক' আইডি নয়! দয়া করে সঠিক আইডি এর কুকি দিন:")
                 bot.register_next_step_handler(msg, role_step_1)
         else:
             msg = bot.send_message(chat_id, "❌ সেশনটি ইনভ্যালিড বা এক্সপায়ার্ড! আবার নতুন সেশন দিন:")
@@ -631,6 +634,11 @@ def router(m):
         bot.send_message(chat_id, "🚀 BOOM Master Bot Active!", reply_markup=main_menu())
         
     elif t == "🔑 Admin Login":
+        # টেলিগ্রাম ইউজার আইডি চেক
+        if m.from_user.id != ADMIN_ID:
+            bot.send_message(chat_id, "⛔ আপনি এডমিন নন!")
+            return
+            
         markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True).add("🏠 Back to Menu")
         msg = bot.send_message(chat_id, "🔑 Admin সেশন দিন (SESSION এবং TS0108b707):", reply_markup=markup)
         bot.register_next_step_handler(msg, admin_login)
