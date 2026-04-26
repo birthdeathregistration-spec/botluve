@@ -1,5 +1,5 @@
 pyTelegramBotAPI
 requests
-playwright
-python-dotenv
 flask
+pymongo
+playwright
