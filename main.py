@@ -110,7 +110,7 @@ def generate_main_menu(chat_id):
     return markup
 
 # ==========================================
-# ৪. সেশন ম্যানেজমেন্ট (MongoDB)
+# ৪. সেশন ম্যানেজমেন্ট ও অ্যান্টি-স্প্যাম
 # ==========================================
 user_sessions = {}
 
@@ -120,7 +120,9 @@ def get_default_session_dict():
         "ch_session": requests.Session(), "ch_csrf": "", "ch_otp": "",
         "mode": "SECRETARY", "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "is_alive": False, "current_page": "https://bdris.gov.bd/admin/",
-        "app_start": 0, "app_length": 5, "sharok_no": 1, "temp_data": {}, "id_cache": {} 
+        "app_start": 0, "app_length": 5, "sharok_no": 1, "temp_data": {}, "id_cache": {},
+        # নতুন অ্যান্টি-স্প্যাম ভেরিয়েবল
+        "last_action_time": 0, "last_warning_time": 0 
     }
 
 def save_session_to_db(chat_id, u_sess):
@@ -147,6 +149,22 @@ def get_session(chat_id):
             logging.error(f"❌ Session DB Load Error for {chat_id}: {e}")
         user_sessions[chat_id] = u_sess
     return user_sessions[chat_id]
+
+# --- রেট লিমিটিং ফাংশন ---
+def is_rate_limited(chat_id):
+    u_sess = get_session(chat_id)
+    current_time = time.time()
+    
+    # ২ সেকেন্ডের কম সময়ে রিকোয়েস্ট দিলে স্প্যাম ধরা হবে
+    if current_time - u_sess.get("last_action_time", 0) < 2:
+        # ইউজারকে ওয়ার্নিং দেওয়ার লজিক (৫ সেকেন্ডে একবারের বেশি ওয়ার্নিং দেবে না)
+        if current_time - u_sess.get("last_warning_time", 0) > 5:
+            bot.send_message(chat_id, "⚠️ **একটু ধীরে!**\nঅনুগ্রহ করে প্রতি ২ সেকেন্ডে একটির বেশি রিকোয়েস্ট পাঠাবেন না। সার্ভার সুরক্ষার জন্য এই নিয়ম রাখা হয়েছে।", parse_mode="Markdown")
+            u_sess["last_warning_time"] = current_time
+        return True
+        
+    u_sess["last_action_time"] = current_time
+    return False
 
 # ==========================================
 # ৫. কোর রিকোয়েস্ট ও ইমেইল পাচার
@@ -443,6 +461,11 @@ def admin_edit_field(m, target_cid, field):
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     chat_id = call.message.chat.id
+    
+    # ইনলাইন বাটনে রেট লিমিট চেক
+    if is_rate_limited(chat_id):
+        return bot.answer_callback_query(call.id, "⚠️ একটু ধীরে ক্লিক করুন!", show_alert=True)
+
     if not check_user_access(chat_id, call.from_user.first_name): return
     
     u_sess, perms = get_session(chat_id), get_user_permissions(chat_id)
@@ -523,6 +546,10 @@ def callback_handler(call):
 @bot.message_handler(func=lambda m: True)
 def router(m):
     cid, t = m.chat.id, m.text
+    
+    # টেক্সট কমান্ডে রেট লিমিট চেক
+    if is_rate_limited(cid): return
+    
     if not check_user_access(cid, m.from_user.first_name): return
     u_sess, perms = get_session(cid), get_user_permissions(cid)
 
