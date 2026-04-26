@@ -1,5 +1,4 @@
 pyTelegramBotAPI
 requests
-flask
+Flask
 pymongo
-playwright
