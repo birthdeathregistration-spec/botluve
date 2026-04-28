@@ -341,7 +341,8 @@ def is_rate_limited(user_id):
 
 def is_cancel(m):
     if not m or not m.text: return False
-    if any(m.text.startswith(kw) for kw in ("/start", "Back to Menu", "Dashboard", "🏠 Dashboard")):
+    t = m.text.strip()
+    if "/start" in t or "Back to Menu" in t or "Dashboard" in t:
         bot.clear_step_handler_by_chat_id(m.chat.id)
         safe_send(m.chat.id, "🏠 মেনুতে ফিরে আসা হলো।", reply_markup=generate_main_menu(m.chat.id, m.from_user.id))
         return True
@@ -380,7 +381,8 @@ def generate_main_menu(chat_id, user_id=None):
         if perms.get("search") or user_id == ADMIN_ID: row_search.extend(["🌐 Search By Name", "🔢 Search By UBRN"])
         markup.row(*row_search)
         
-        row_tools = []
+        # ✅ নতুন ডিফল্ট ভেরিফায়ার বাটন যুক্ত করা হলো
+        row_tools = ["📌 Set Default Verifier"]
         if perms.get("ubrn_update") or user_id == ADMIN_ID: row_tools.append("👨‍👩‍👦 পিতা-মাতার UBRN হালনাগাদ")
         if perms.get("server_pdf") or user_id == ADMIN_ID: row_tools.append("🖨️ Server PDF Print")
         if row_tools: markup.row(*row_tools)
@@ -749,7 +751,6 @@ def download_server_pdf(chat_id, session_uid, enc_id, filename):
         
     safe_send(chat_id, "📥 পিডিএফ জেনারেট হচ্ছে (একটু সময় লাগতে পারে)...")
     
-    # ✅ FIX: Missing headers restored for PDF generation
     check_headers = {
         'User-Agent': ua, 
         'Referer': 'https://bdris.gov.bd/admin/',
@@ -918,8 +919,111 @@ def fetch_list_ui(chat_id, user_id, cmd, message_id=None):
     else: safe_send(chat_id, msg_text, reply_markup=markup, parse_mode='Markdown')
 
 # ==========================================
-# ১০. Search & UBRN Update
+# ১০. Search, UBRN Update ও Verifier Setup
 # ==========================================
+def process_set_default_verifier(m):
+    if is_cancel(m): return
+    uid, cid = m.from_user.id, m.chat.id
+    ubrn = m.text.strip()
+    if not ubrn.isdigit() or len(ubrn) != 17:
+        safe_send(cid, "❌ সঠিক ১৭ ডিজিট UBRN দিন:")
+        bot.register_next_step_handler_by_chat_id(cid, process_set_default_verifier)
+        return
+
+    wait = safe_send(cid, "⏳ ভেরিফায়ার যাচাই করা হচ্ছে...")
+    
+    def execute_set():
+        try:
+            fresh_sess = get_session(uid)
+            ch_sess, _ = get_active_session(fresh_sess)
+            _, active_csrf = get_active_session(fresh_sess)
+            
+            headers = {
+                'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"),
+                'Referer': 'https://bdris.gov.bd/admin/',
+                'client': 'bris',
+                'x-csrf-token': active_csrf,
+                'x-requested-with': 'XMLHttpRequest'
+            }
+            res_info = ch_sess.get(f"https://bdris.gov.bd/api/br/is-person-alive-by-ubrn/{ubrn}", headers=headers, timeout=HTTP_TIMEOUT)
+            
+            safe_delete(cid, wait.message_id)
+            if res_info and res_info.status_code == 200:
+                v_data = res_info.json()
+                v_name = v_data.get('personNameBn') or v_data.get('nameBn') or v_data.get('name')
+                if v_name:
+                    access_collection.update_one({"chat_id": uid}, {"$set": {"verifier_ubrn": ubrn, "verifier_name": v_name}})
+                    safe_send(cid, f"✅ আপনার ডিফল্ট ভেরিফায়ার সেট করা হয়েছে:\n👤 *{v_name}*\n🔢 `{ubrn}`", parse_mode="Markdown", reply_markup=generate_main_menu(cid, uid))
+                else:
+                    safe_send(cid, "❌ সার্ভারে নাম পাওয়া যায়নি।")
+            else:
+                safe_send(cid, "❌ ভেরিফায়ার পাওয়া যায়নি বা সার্ভার এরর।")
+        except Exception as e:
+            logging.error(f"Set Verifier Error: {e}")
+            safe_send(cid, "❌ ডেটা প্রসেসিং এরর।")
+            
+    Thread(target=execute_set, daemon=True).start()
+
+def process_reg_verifier_step(m, uid, enc_id, save_default=False):
+    if is_cancel(m): return
+    ubrn = m.text.strip()
+    if not ubrn.isdigit() or len(ubrn) != 17:
+        safe_send(m.chat.id, "❌ সঠিক ১৭ ডিজিট UBRN দিন:")
+        bot.register_next_step_handler_by_chat_id(m.chat.id, lambda msg: process_reg_verifier_step(msg, uid, enc_id, save_default))
+        return
+
+    wait = safe_send(m.chat.id, "⏳ ভেরিফায়ারের তথ্য খোঁজা হচ্ছে...")
+
+    def execute_registration():
+        try:
+            fresh_sess = get_session(uid)
+            ch_sess, _ = get_active_session(fresh_sess)
+            _, active_csrf = get_active_session(fresh_sess)
+            with session_lock: otp_val = fresh_sess.get("ch_otp")
+
+            headers = {
+                'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"),
+                'Referer': 'https://bdris.gov.bd/admin/',
+                'client': 'bris',
+                'x-csrf-token': active_csrf,
+                'x-requested-with': 'XMLHttpRequest'
+            }
+
+            res_info = ch_sess.get(f"https://bdris.gov.bd/api/br/is-person-alive-by-ubrn/{ubrn}", headers=headers, timeout=HTTP_TIMEOUT)
+            if not res_info or res_info.status_code != 200:
+                safe_delete(m.chat.id, wait.message_id)
+                safe_send(m.chat.id, "❌ ভেরিফায়ার UBRN যাচাই করা যায়নি।")
+                return
+
+            v_data = res_info.json()
+            v_name = v_data.get('personNameBn') or v_data.get('nameBn') or v_data.get('name')
+            
+            if save_default and v_name:
+                access_collection.update_one({"chat_id": uid}, {"$set": {"verifier_ubrn": ubrn, "verifier_name": v_name}})
+
+            safe_edit(m.chat.id, wait.message_id, f"✅ ভেরিফায়ার: {v_name}\n⏳ সাবমিট করা হচ্ছে...")
+
+            today = datetime.now().strftime("%d/%m/%Y")
+            payload = {
+                "birthPlaceAndDobVerifierName": v_name, "birthPlaceAndDobVerifierBrn": ubrn, "birthPlaceAndDobVerificationDate": today,
+                "permAddrVerifierName": v_name, "permAddrVerifierBrn": ubrn, "permAddrVerificationDate": today,
+                "otp": otp_val, "data": enc_id, "_csrf": active_csrf
+            }
+
+            res_reg = ch_sess.post("https://bdris.gov.bd/api/br/application/register", headers=headers, data=payload, timeout=HTTP_TIMEOUT)
+
+            safe_delete(m.chat.id, wait.message_id)
+            if res_reg and res_reg.status_code == 200:
+                safe_send(m.chat.id, "✅ নতুন জন্ম নিবন্ধন সফলভাবে রেজিস্টার হয়েছে!")
+            else:
+                safe_send(m.chat.id, f"❌ রেজিস্ট্রেশন ব্যর্থ! সার্ভার রেসপন্স: {res_reg.status_code if res_reg else 'None'}")
+        except Exception as e:
+            logging.error(f"Reg Flow Error: {e}")
+            safe_delete(m.chat.id, wait.message_id)
+            safe_send(m.chat.id, "❌ রেজিস্ট্রেশনে এরর হয়েছে।")
+
+    Thread(target=execute_registration, daemon=True).start()
+
 def process_search_by_name(m):
     try:
         if is_cancel(m): return
@@ -1373,51 +1477,80 @@ def callback_handler(call):
                 
         Thread(target=process_recv, daemon=True).start()
 
-    elif action in ["reg", "coreg"] and mode == "CHAIRMAN":
-        bot.answer_callback_query(call.id, "⏳ রেজিস্ট্রেশন হচ্ছে...")
-        path = "correction-application" if action == "coreg" else "application"
+    elif action == "coreg" and mode == "CHAIRMAN":
+        bot.answer_callback_query(call.id, "⏳ কারেকশন রেজিস্টার হচ্ছে...")
         
-        def process_registration():
+        def process_coreg():
             try:
                 fresh_sess = get_session(uid)
                 ch_sess, _ = get_active_session(fresh_sess)
+                _, active_csrf = get_active_session(fresh_sess)
                 
-                with session_lock:
-                    ua = fresh_sess.get("ua")
-                    otp_val = fresh_sess.get("ch_otp")
+                # ✅ FIX: Correction এ কোনো OTP লাগে না, শুধু Chairman Session ও Headers
+                headers = {
+                    'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"),
+                    'Referer': 'https://bdris.gov.bd/admin/',
+                    'client': 'bris',
+                    'x-csrf-token': active_csrf,
+                    'x-requested-with': 'XMLHttpRequest'
+                }
+                payload = {"data": enc_id, "_csrf": active_csrf}
                 
-                # ✅ FIX: Added Referer header and Session Expiry Check for Registration
-                headers = {'User-Agent': ua, 'Referer': 'https://bdris.gov.bd/admin/'}
-                res_get = ch_sess.get(f"https://bdris.gov.bd/admin/br/{path}/register?data={enc_id}", headers=headers, timeout=HTTP_TIMEOUT)
+                res = ch_sess.post("https://bdris.gov.bd/api/br/correction-application/register", headers=headers, data=payload, timeout=HTTP_TIMEOUT)
                 
-                if "login" in res_get.url.lower():
-                    safe_send(cid, "❌ নিবন্ধক (CH) সেশন এক্সপায়ার হয়েছে। দয়া করে আবার লগইন করুন।")
-                    return
-                    
-                html = res_get.text
-                v = re.search(r'<option\s+value="(\d{17})"[^>]*>([^<]+)</option>', html)
-                if v:
-                    _, active_csrf = get_active_session(fresh_sess)
-                    payload = {
-                        "birthPlaceAndDobVerifierName": v.group(2).strip(), 
-                        "birthPlaceAndDobVerifierBrn": v.group(1), 
-                        "birthPlaceAndDobVerificationDate": datetime.now().strftime("%d/%m/%Y"), 
-                        "otp": otp_val, 
-                        "data": enc_id, 
-                        "_csrf": active_csrf
-                    }
-                    res = call_api(uid, f"https://bdris.gov.bd/api/br/{path}/register", method="POST", data=payload)
-                    if res and res.status_code == 200: 
-                        safe_send(cid, "✅ রেজিস্ট্রেশন সফল!")
-                    else: 
-                        safe_send(cid, "❌ রেজিস্ট্রেশন ব্যর্থ। সার্ভার রেসপন্স করেনি।")
+                if res and res.status_code == 200: 
+                    safe_send(cid, "✅ কারেকশন (Correction) সফলভাবে রেজিস্টার হয়েছে!")
                 else: 
-                    safe_send(cid, "❌ ভেরিফায়ার পাওয়া যায়নি। সার্ভারে ডেটা নেই।")
+                    safe_send(cid, f"❌ কারেকশন ব্যর্থ। সার্ভার রেসপন্স: {res.status_code if res else 'None'}")
             except Exception as e:
-                logging.error(f"Registration Error: {e}")
-                safe_send(cid, "❌ রেজিস্ট্রেশনে এরর।")
+                logging.error(f"Correction Reg Error: {e}")
+                safe_send(cid, "❌ কারেকশন রেজিস্ট্রেশনে এরর।")
                 
-        Thread(target=process_registration, daemon=True).start()
+        Thread(target=process_coreg, daemon=True).start()
+
+    elif action == "reg" and mode == "CHAIRMAN":
+        bot.answer_callback_query(call.id, "⏳ চেক করা হচ্ছে...")
+        
+        # ✅ ইউজারের সেভ করা ডিফল্ট ভেরিফায়ার চেক করা হচ্ছে
+        user_record = access_collection.find_one({"chat_id": uid}) or {}
+        v_ubrn = user_record.get("verifier_ubrn")
+        v_name = user_record.get("verifier_name")
+        
+        if v_ubrn and v_name:
+            # ডিফল্ট সেট করা থাকলে ওয়ান-ক্লিকেই কাজ শেষ!
+            def execute_auto_reg():
+                try:
+                    fresh_sess = get_session(uid)
+                    ch_sess, _ = get_active_session(fresh_sess)
+                    _, active_csrf = get_active_session(fresh_sess)
+                    with session_lock: otp_val = fresh_sess.get("ch_otp")
+
+                    today = datetime.now().strftime("%d/%m/%Y")
+                    payload = {
+                        "birthPlaceAndDobVerifierName": v_name, "birthPlaceAndDobVerifierBrn": v_ubrn, "birthPlaceAndDobVerificationDate": today,
+                        "permAddrVerifierName": v_name, "permAddrVerifierBrn": v_ubrn, "permAddrVerificationDate": today,
+                        "otp": otp_val, "data": enc_id, "_csrf": active_csrf
+                    }
+                    headers = {
+                        'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"), 'Referer': 'https://bdris.gov.bd/admin/',
+                        'client': 'bris', 'x-csrf-token': active_csrf, 'x-requested-with': 'XMLHttpRequest'
+                    }
+                    
+                    res_reg = ch_sess.post("https://bdris.gov.bd/api/br/application/register", headers=headers, data=payload, timeout=HTTP_TIMEOUT)
+                    
+                    if res_reg and res_reg.status_code == 200:
+                        safe_send(cid, f"✅ *{v_name}* এর মাধ্যমে নতুন জন্ম নিবন্ধন অটোমেটিকভাবে রেজিস্টার হয়েছে!", parse_mode="Markdown")
+                    else:
+                        safe_send(cid, f"❌ অটো-রেজিস্ট্রেশন ব্যর্থ! সার্ভার রেসপন্স: {res_reg.status_code if res_reg else 'None'}")
+                except Exception as e:
+                    logging.error(f"Auto Reg Flow Error: {e}")
+                    safe_send(cid, "❌ রেজিস্ট্রেশনে এরর হয়েছে।")
+                    
+            Thread(target=execute_auto_reg, daemon=True).start()
+        else:
+            # ডিফল্ট না থাকলে প্রথমবার চাইবে এবং সেভ করে নেবে
+            msg = safe_send(cid, "👤 আপনার কোনো ডিফল্ট ভেরিফায়ার সেট করা নেই।\nঅনুগ্রহ করে যাচাইকারীর (Verifier) ১৭ ডিজিট UBRN দিন:")
+            bot.register_next_step_handler_by_chat_id(cid, lambda m: process_reg_verifier_step(m, uid, enc_id, save_default=True))
 
     elif action == "print":
         perms = get_user_permissions(uid)
@@ -1499,10 +1632,11 @@ def router(m):
                 markup.row(telebot.types.InlineKeyboardButton(f"{'✅' if u.get('status')=='allowed' else '🚫'} {u.get('name','')} | {u.get('balance',0)}৳", callback_data=f"admuser:{u.get('chat_id')}"))
             return safe_send(cid, "👥 ইউজার প্যানেল:", reply_markup=markup)
 
-    if t.startswith("/start") or t == "Back to Menu":
+    if t.startswith("/start") or "Back to Menu" in t:
+        bot.clear_step_handler_by_chat_id(cid)
         return safe_send(cid, "🚀 BDRIS Master Bot Active!", reply_markup=generate_main_menu(cid, uid))
 
-    elif t == "🏠 Dashboard":
+    elif "Dashboard" in t:
         if is_alive:
             navigate_to(uid, "https://bdris.gov.bd/admin/")
             safe_send(cid, "🏠 ড্যাশবোর্ড রিফ্রেশ হয়েছে।", reply_markup=generate_main_menu(cid, uid))
@@ -1549,6 +1683,9 @@ def router(m):
         elif t == "🖨️ Server PDF Print" and (perms.get("server_pdf") or uid == ADMIN_ID):
             safe_send(cid, "🖨️ ১৭ ডিজিট UBRN দিন:")
             bot.register_next_step_handler_by_chat_id(cid, download_server_by_ubrn)
+        elif t == "📌 Set Default Verifier":
+            safe_send(cid, "📌 আপনার ডিফল্ট ভেরিফায়ারের ১৭ ডিজিট UBRN দিন:")
+            bot.register_next_step_handler_by_chat_id(cid, process_set_default_verifier)
         else: safe_send(cid, "⚠️ অজানা কমান্ড।", reply_markup=generate_main_menu(cid, uid))
         return
 
