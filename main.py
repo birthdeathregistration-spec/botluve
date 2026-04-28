@@ -22,7 +22,6 @@ from pymongo.errors import DuplicateKeyError
 # ==========================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# ✅ FIXED: RLock দিয়ে nested lock deadlock প্রতিরোধ করা হয়েছে
 session_lock = RLock()
 download_lock = threading.Lock()
 active_downloads = set()
@@ -33,12 +32,10 @@ _CSRF_RE = re.compile(r'name="_csrf"\s+content="([^"]+)"')
 _DATA_ID_RE = re.compile(r'href=".*?\?data=([A-Za-z0-9_\-]+)"')
 _PHONE_RE = re.compile(r'^(\+?880|0)1[3-9]\d{8}$')
 
-# ✅ FIXED: Magic numbers constants এ move করা হয়েছে
 VALID_CMDS = frozenset(['apps', 'corr', 'repr'])
 DEFAULT_PERMS = {"apps": True, "corr": True, "repr": True, "search": True, "ubrn_update": True, "server_pdf": True, "print": True}
 SERVICE_COSTS = {"pdf": 25, "pay": 25, "server_pdf_login": 25, "server_pdf_no_login": 50}
 
-# Constants
 MAX_CACHE_SIZE = 300
 SESSION_TIMEOUT = 3600
 RATE_LIMIT_INTERVAL = 0.8
@@ -86,12 +83,9 @@ except Exception as e:
 # ২. সেফ র‍্যাপারস ও ইউজার লজিক
 # ==========================================
 def sanitize_name(name_str):
-    """✅ FIXED: Markdown injection প্রতিরোধ করা হয়েছে"""
-    # Markdown special chars remove করো
     sanitized = re.sub(r'[*_`\[\]()~|{}<>\\-]', '', str(name_str))
-    # XSS prevention
     sanitized = sanitized.replace('<', '').replace('>', '')
-    return sanitized[:100]  # Length limit
+    return sanitized[:100]
 
 def safe_send(chat_id, text, **kwargs):
     try: return bot.send_message(chat_id, text, **kwargs)
@@ -166,7 +160,7 @@ def get_user_permissions(user_id):
     return DEFAULT_PERMS.copy()
 
 # ==========================================
-# ৩. সেশন ম্যানেজমেন্ট (Thread-Safe with RLock)
+# ৩. সেশন ম্যানেজমেন্ট
 # ==========================================
 user_sessions = {}
 
@@ -182,19 +176,16 @@ def get_default_session_dict():
     }
 
 def get_session(user_id):
-    # ✅ FIXED: RLock দিয়ে nested lock safe করা হয়েছে
     with session_lock:
         if user_id in user_sessions: 
             return user_sessions[user_id]
     
-    # DB fetch without lock to prevent blocking
     db_data = None
     try:
         db_data = sessions_collection.find_one({"chat_id": user_id})
     except Exception as e: 
         logging.error(f"DB Load Error: {e}")
 
-    # Double-checked locking
     with session_lock:
         if user_id not in user_sessions:
             u_sess = get_default_session_dict()
@@ -224,20 +215,17 @@ def save_session_to_db(user_id, u_sess):
         logging.error(f"DB Save Error: {e}")
 
 def keep_sessions_alive_and_cleanup():
-    """✅ FIXED: Thread-safe session 관리 및 cleanup"""
     while True:
         time.sleep(KEEPALIVE_INTERVAL)
         now = time.time()
 
         with session_lock:
-            # Expired sessions খুঁজে বের করো
             expired_users = [
                 uid for uid, s in user_sessions.items()
                 if not s.get("sec_alive", False) and not s.get("ch_alive", False)
                 and (now - s.get("last_action_time", now)) > SESSION_TIMEOUT
             ]
             
-            # Active users extract করো
             active_users = [
                 (uid, u_sess["ua"], u_sess["req_session"], u_sess["ch_session"],
                  u_sess.get("sec_alive", False), u_sess.get("ch_alive", False))
@@ -245,11 +233,9 @@ def keep_sessions_alive_and_cleanup():
                 if u_sess.get("sec_alive", False) or u_sess.get("ch_alive", False)
             ]
             
-            # Expired users মুছে ফেলো
             for uid in expired_users: 
                 del user_sessions[uid]
 
-        # DB update করো (lock ছাড়া)
         for uid in expired_users:
             try: 
                 sessions_collection.update_one(
@@ -259,7 +245,6 @@ def keep_sessions_alive_and_cleanup():
             except Exception as e: 
                 logging.warning(f"DB cleanup error [{uid}]: {e}")
 
-        # Keepalive HTTP calls করো
         for uid, ua, req_sess, ch_sess, sec_alive, ch_alive in active_users:
             new_sec_alive = False
             new_ch_alive = False
@@ -310,7 +295,6 @@ def keep_sessions_alive_and_cleanup():
                 logging.warning(f"DB update error [{uid}]: {e}")
 
 def is_rate_limited(user_id):
-    """✅ FIXED: RLock nested call safe করা হয়েছে"""
     u_sess = get_session(user_id)
     now = time.time()
     trigger_warning = False
@@ -347,6 +331,7 @@ def generate_main_menu(chat_id, user_id=None):
     u_sess = get_session(user_id)
     perms = get_user_permissions(user_id)
 
+    # ✅ FIX: User Login বাটন সবসময় দেখাবে (লগইন থাকলেও)
     if not u_sess.get("is_alive", False):
         markup.row("🔑 User Login")
         if perms.get("server_pdf") or user_id == ADMIN_ID:
@@ -356,7 +341,7 @@ def generate_main_menu(chat_id, user_id=None):
         if user_id == ADMIN_ID:
             markup.row("🔑 Admin Login", "🛠️ Check Cookies", "👥 Manage Users")
     else:
-        # ✅ লগইন থাকলেও User Login বাটন দেখাবে
+        # ✅ FIX: লগইন অবস্থায়ও User Login বাটন থাকবে
         markup.row("🔑 User Login")
         
         if is_payment_active(): markup.row("💰 My Profile & Recharge")
@@ -381,11 +366,11 @@ def generate_main_menu(chat_id, user_id=None):
             markup.row("🔑 Admin Login", "🛠️ Check Cookies", "👥 Manage Users")
             
     return markup
+
 # ==========================================
 # ৫. কোর API রিকোয়েস্ট ফাংশন
 # ==========================================
 def extract_sid_tsid(text):
-    """✅ FIXED: Token assignment logic সঠিক করা হয়েছে"""
     text = text.strip()
     s = _COOKIE_RE.search(text)
     t = _TS_RE.search(text)
@@ -396,18 +381,13 @@ def extract_sid_tsid(text):
     tokens = [tok.strip() for tok in re.split(r'[\s;,"\'\n\r]+', text) if len(tok.strip()) >= ID_CACHE_LIMIT]
     
     if len(tokens) >= 2:
-        # ✅ FIXED: TS01 সবসময় SESSION এর চেয়ে লম্বা হয়
-        # তাই লম্বাটা TS, ছোটটা SESSION
         longer_token = tokens[0] if len(tokens[0]) >= len(tokens[1]) else tokens[1]
         shorter_token = tokens[1] if longer_token == tokens[0] else tokens[0]
-        
-        # SESSION হবে shorter, TS হবে longer
         return shorter_token, longer_token
         
     return None, None
 
 def get_active_session(u_sess):
-    """✅ FIXED: Thread-safe session read"""
     with session_lock:
         sec_ok = u_sess.get("sec_alive", False)
         ch_ok = u_sess.get("ch_alive", False)
@@ -485,7 +465,6 @@ def admin_login_logic(m):
                 u_sess["is_alive"] = True
             
             navigate_to(uid, "https://bdris.gov.bd/admin/")
-            
             save_session_to_db(uid, u_sess)
             safe_send(m.chat.id, "✅ এডমিন সেশন সেট হয়েছে!", reply_markup=generate_main_menu(m.chat.id, uid))
         else:
@@ -508,6 +487,8 @@ def role_step_1(m):
         with session_lock:
             _set_session_cookies(u_sess["ch_session"], sid, tsid)
             u_sess["ch_alive"] = True
+            # ✅ FIX: is_alive সঠিকভাবে set করা হয়েছে
+            u_sess["is_alive"] = u_sess.get("sec_alive", False) or True
         safe_send(m.chat.id, "✅ নিবন্ধক সেশন গৃহীত। এখন নিবন্ধকের OTP দিন:")
         bot.register_next_step_handler_by_chat_id(m.chat.id, role_step_2)
     except Exception as e:
@@ -543,7 +524,6 @@ def role_step_3(m):
                 u_sess["is_alive"] = True
             
             navigate_to(uid, "https://bdris.gov.bd/admin/")
-            
             save_session_to_db(uid, u_sess)
             safe_send(m.chat.id, "🎉 লগইন সফল!", reply_markup=generate_main_menu(m.chat.id, uid))
         else:
@@ -581,7 +561,6 @@ def process_recharge(m):
         logging.error(f"Recharge Error: {e}")
 
 def admin_add_balance_step(m, target_id, trxid, admin_msg_id):
-    """✅ FIXED: Recharge log update error handling যোগ করা হয়েছে"""
     try:
         if is_cancel(m): return
         try:
@@ -591,7 +570,6 @@ def admin_add_balance_step(m, target_id, trxid, admin_msg_id):
             
             update_balance(target_id, amount)
             
-            # ✅ FIXED: Recharge log update error handling
             try:
                 recharge_logs.update_one({"_id": trxid}, {"$set": {"status": "approved"}})
             except Exception as e:
@@ -610,7 +588,6 @@ def admin_add_balance_step(m, target_id, trxid, admin_msg_id):
 # ৭. সার্ভার পিডিএফ ও ডাউনলোড
 # ==========================================
 def download_server_by_ubrn(m):
-    """✅ FIXED: Error handling এবং wait message cleanup"""
     try:
         if is_cancel(m): return
         uid, cid = m.from_user.id, m.chat.id
@@ -643,6 +620,8 @@ def download_server_by_ubrn(m):
         def fetch_and_send():
             try:
                 res = call_api(working_uid, f"https://bdris.gov.bd/api/br/info/ubrn/{ubrn}")
+                
+                # ✅ FIX: wait message সবসময় delete হবে
                 if wait: 
                     safe_delete(cid, wait.message_id)
                 
@@ -653,13 +632,6 @@ def download_server_by_ubrn(m):
                     raise ValueError("ID Not Found")
             except Exception as e:
                 logging.error(f"Download Fetch Error: {e}")
-                # ✅ FIXED: Wait message delete error handling
-                try:
-                    if wait: 
-                        safe_delete(cid, wait.message_id)
-                except:
-                    pass
-                
                 if cost > 0: 
                     update_balance(uid, cost)
                 safe_send(cid, "❌ সার্ভার এরর বা ডেটা পাওয়া যায়নি। টাকা রিফান্ড করা হয়েছে।")
@@ -674,7 +646,6 @@ def download_server_by_ubrn(m):
                 update_balance(uid, cost)
             with download_lock: 
                 active_downloads.discard(task_id)
-            # ✅ FIXED: Wait message cleanup
             if wait:
                 safe_delete(cid, wait.message_id)
             safe_send(cid, "❌ সিস্টেম ওভারলোড। টাকা রিফান্ড করা হয়েছে।")
@@ -852,7 +823,15 @@ def process_search_by_name(m):
         if res and res.status_code == 200:
             try:
                 data = res.json()
-                items = data if isinstance(data, list) else data.get('data', [data])
+                # ✅ FIX: data type সঠিকভাবে check করা হয়েছে
+                if isinstance(data, list):
+                    items = data
+                elif isinstance(data, dict):
+                    items = data.get('data', [])
+                    if not isinstance(items, list):
+                        items = [data]
+                else:
+                    items = []
                 
                 if not items:
                     safe_send(m.chat.id, f"📭 *'{safe_name}'* নামে কোনো তথ্য পাওয়া যায়নি।", parse_mode='Markdown')
@@ -925,7 +904,7 @@ def start_ubrn_flow(m):
         with session_lock: u_sess["temp_data"]["ubrn"] = {}
         navigate_to(m.from_user.id, "https://bdris.gov.bd/admin/br/parents-ubrn-update")
         markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True).add("🏠 Back to Menu")
-        safe_send(m.chat.id, "१. ব্যক্তির ১७ ডিজিট UBRN দিন:", reply_markup=markup)
+        safe_send(m.chat.id, "১. ব্যক্তির ১৭ ডিজিট UBRN দিন:", reply_markup=markup)
         bot.register_next_step_handler_by_chat_id(m.chat.id, ubrn_p_step)
     except Exception as e:
         logging.error(f"Start UBRN Flow Error: {e}")
@@ -942,11 +921,11 @@ def ubrn_p_step(m):
         if not m.text: return
         val = _validate_ubrn_input(m.text)
         if val is None:
-            safe_send(m.chat.id, "❌ সঠিক १७ ডিজিট UBRN দিন:")
+            safe_send(m.chat.id, "❌ সঠিক ১৭ ডিজিট UBRN দিন:")
             bot.register_next_step_handler_by_chat_id(m.chat.id, ubrn_p_step)
             return
         with session_lock: get_session(m.from_user.id)["temp_data"]["ubrn"]["p"] = val
-        safe_send(m.chat.id, "२. পিতার UBRN দিন (না থাকলে 0 দিন):")
+        safe_send(m.chat.id, "২. পিতার UBRN দিন (না থাকলে 0 দিন):")
         bot.register_next_step_handler_by_chat_id(m.chat.id, ubrn_f_step)
     except Exception as e:
         logging.error(f"UBRN Step 1 Error: {e}")
@@ -957,11 +936,11 @@ def ubrn_f_step(m):
         if not m.text: return
         val = _validate_ubrn_input(m.text)
         if val is None:
-            safe_send(m.chat.id, "❌ সঠিক १७ ডিজিট UBRN বা 0 দিন:")
+            safe_send(m.chat.id, "❌ সঠিক ১৭ ডিজিট UBRN বা 0 দিন:")
             bot.register_next_step_handler_by_chat_id(m.chat.id, ubrn_f_step)
             return
         with session_lock: get_session(m.from_user.id)["temp_data"]["ubrn"]["f"] = val
-        safe_send(m.chat.id, "३. মাতার UBRN দিন (না থাকলে 0 দিন):")
+        safe_send(m.chat.id, "৩. মাতার UBRN দিন (না থাকলে 0 দিন):")
         bot.register_next_step_handler_by_chat_id(m.chat.id, ubrn_m_step)
     except Exception as e:
         logging.error(f"UBRN Step 2 Error: {e}")
@@ -972,11 +951,11 @@ def ubrn_m_step(m):
         if not m.text: return
         val = _validate_ubrn_input(m.text)
         if val is None:
-            safe_send(m.chat.id, "❌ সঠিক १७ ডিজিট UBRN বা 0 দিন:")
+            safe_send(m.chat.id, "❌ সঠিক ১৭ ডিজিট UBRN বা 0 দিন:")
             bot.register_next_step_handler_by_chat_id(m.chat.id, ubrn_m_step)
             return
         with session_lock: get_session(m.from_user.id)["temp_data"]["ubrn"]["m"] = val
-        safe_send(m.chat.id, "४. মোবাইল নম্বর দিন (01XXXXXXXXX):")
+        safe_send(m.chat.id, "৪. মোবাইল নম্বর দিন (01XXXXXXXXX):")
         bot.register_next_step_handler_by_chat_id(m.chat.id, ubrn_ph_step)
     except Exception as e:
         logging.error(f"UBRN Step 3 Error: {e}")
@@ -1103,7 +1082,6 @@ def refresh_admin_panel(chat_id, target_user_id, message_id=None):
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
-    """✅ FIXED: Thread-safe CSRF fetch করা হয়েছে"""
     uid, cid = call.from_user.id, call.message.chat.id
     if is_rate_limited(uid): return bot.answer_callback_query(call.id, "⚠️ একটু ধীরে!", show_alert=True)
     if not check_user_access(uid, call.from_user.first_name): return bot.answer_callback_query(call.id, "🚫 অ্যাক্সেস নেই!", show_alert=True)
@@ -1130,6 +1108,7 @@ def callback_handler(call):
 
     elif action == "setlength" and len(parts) == 3:
         cmd = parts[1]
+        # ✅ FIX: সব জায়গায় try/except দিয়ে int() convert করা হয়েছে
         try: length = int(parts[2])
         except: return bot.answer_callback_query(call.id, "❌ অবৈধ মান।", show_alert=True)
         with session_lock: 
@@ -1140,7 +1119,7 @@ def callback_handler(call):
         fetch_list_ui(cid, uid, cmd, call.message.message_id)
 
     elif action == "reqrecharge":
-        safe_send(cid, "💼 *রিচার্জের নিয়ম:*\n१. বিকাশ/নগদ নম্বরে Send Money করুন\n२. TrxID মেসেজে পাঠান:", parse_mode="Markdown")
+        safe_send(cid, "💼 *রিচার্জের নিয়ম:*\n১. বিকাশ/নগদ নম্বরে Send Money করুন\n২. TrxID মেসেজে পাঠান:", parse_mode="Markdown")
         bot.register_next_step_handler_by_chat_id(cid, process_recharge)
         bot.answer_callback_query(call.id)
 
@@ -1174,7 +1153,9 @@ def callback_handler(call):
         bot.answer_callback_query(call.id)
 
     elif action == "tgl" and uid == ADMIN_ID and len(parts) == 4:
-        target_id, perm_key, state_val = int(parts[1]), parts[2], parts[3]
+        try: target_id = int(parts[1])
+        except: return bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
+        perm_key, state_val = parts[2], parts[3]
         if perm_key not in DEFAULT_PERMS or state_val not in ("on", "off"): 
             return bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
         access_collection.update_one({"chat_id": target_id}, {"$set": {f"permissions.{perm_key}": state_val == "on"}})
@@ -1182,29 +1163,39 @@ def callback_handler(call):
         refresh_admin_panel(cid, target_id, call.message.message_id)
 
     elif action == "edsec" and uid == ADMIN_ID:
+        try: target_uid = int(sid)
+        except: return bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
         safe_send(cid, f"User {sid} এর নতুন SEC সেশন দিন:")
-        bot.register_next_step_handler_by_chat_id(cid, lambda m: admin_edit_field(m, int(sid), "SEC"))
+        bot.register_next_step_handler_by_chat_id(cid, lambda m: admin_edit_field(m, target_uid, "SEC"))
         bot.answer_callback_query(call.id)
 
     elif action == "edch" and uid == ADMIN_ID:
+        try: target_uid = int(sid)
+        except: return bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
         safe_send(cid, f"User {sid} এর নতুন CH সেশন দিন:")
-        bot.register_next_step_handler_by_chat_id(cid, lambda m: admin_edit_field(m, int(sid), "CH"))
+        bot.register_next_step_handler_by_chat_id(cid, lambda m: admin_edit_field(m, target_uid, "CH"))
         bot.answer_callback_query(call.id)
 
     elif action == "edotp" and uid == ADMIN_ID:
+        try: target_uid = int(sid)
+        except: return bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
         safe_send(cid, f"User {sid} এর নতুন OTP দিন:")
-        bot.register_next_step_handler_by_chat_id(cid, lambda m: admin_edit_field(m, int(sid), "OTP"))
+        bot.register_next_step_handler_by_chat_id(cid, lambda m: admin_edit_field(m, target_uid, "OTP"))
         bot.answer_callback_query(call.id)
 
     elif action == "block" and uid == ADMIN_ID:
-        access_collection.update_one({"chat_id": int(sid)}, {"$set": {"status": "blocked"}})
+        try: target_uid = int(sid)
+        except: return bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
+        access_collection.update_one({"chat_id": target_uid}, {"$set": {"status": "blocked"}})
         bot.answer_callback_query(call.id, "✅ ব্লক করা হয়েছে।", show_alert=True)
-        safe_send(int(sid), "🚫 আপনাকে ব্লক করা হয়েছে।")
+        safe_send(target_uid, "🚫 আপনাকে ব্লক করা হয়েছে।")
 
     elif action == "unblock" and uid == ADMIN_ID:
-        access_collection.update_one({"chat_id": int(sid)}, {"$set": {"status": "allowed"}})
+        try: target_uid = int(sid)
+        except: return bot.answer_callback_query(call.id, "❌ Error", show_alert=True)
+        access_collection.update_one({"chat_id": target_uid}, {"$set": {"status": "allowed"}})
         bot.answer_callback_query(call.id, "✅ আনব্লক করা হয়েছে।", show_alert=True)
-        safe_send(int(sid), "✅ আপনার অ্যাক্সেস পুনরায় চালু হয়েছে।")
+        safe_send(target_uid, "✅ আপনার অ্যাক্সেস পুনরায় চালু হয়েছে।")
 
     elif action == "pay":
         cost = get_service_cost(uid, "pay")
@@ -1224,7 +1215,6 @@ def callback_handler(call):
         
         def process_payment():
             try:
-                # ✅ FIXED: Fresh CSRF fetch thread এর ভেতরে
                 fresh_sess = get_session(uid)
                 _, active_csrf = get_active_session(fresh_sess)
                 
@@ -1384,7 +1374,7 @@ def router(m):
 
     elif t == "🏠 Dashboard":
         if u_sess.get("is_alive", False):
-            success, _ = navigate_to(uid, "https://bdris.gov.bd/admin/")
+            navigate_to(uid, "https://bdris.gov.bd/admin/")
             safe_send(cid, "🏠 ড্যাশবোর্ড রিফ্রেশ হয়েছে।", reply_markup=generate_main_menu(cid, uid))
         else: safe_send(cid, "⚠️ আগে লগইন করুন।", reply_markup=generate_main_menu(cid, uid))
         return
@@ -1396,6 +1386,7 @@ def router(m):
         markup = telebot.types.InlineKeyboardMarkup().add(telebot.types.InlineKeyboardButton("➕ Add Balance", callback_data="reqrecharge"))
         return safe_send(cid, msg, reply_markup=markup, parse_mode="Markdown")
 
+    # ✅ FIX: User Login handler - লগইন থাকলেও কাজ করবে (is_alive check নেই)
     elif t == "🔑 User Login":
         safe_send(cid, "✅ নিবন্ধকের সেশন দিন:")
         bot.register_next_step_handler_by_chat_id(cid, role_step_1)
@@ -1463,7 +1454,6 @@ if __name__ == "__main__":
     while True:
         try: 
             bot.infinity_polling(timeout=20, long_polling_timeout=20)
-
         except requests.exceptions.ReadTimeout:
             logging.warning("⚠️ Telegram Network Timeout, Restarting Polling...")
             time.sleep(2)
