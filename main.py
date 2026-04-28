@@ -757,7 +757,7 @@ def download_server_pdf(chat_id, session_uid, enc_id, filename):
         raise ValueError("Invalid Content-Type from Server")
 
 # ==========================================
-# ৯. অ্যাপ লিস্ট লজিক ও পেজিনেশন
+# ৯. অ্যাপ লিস্ট লজিক ও পেজিনেশন (Modified like old code)
 # ==========================================
 def handle_category_init(m, cmd):
     if cmd not in VALID_CMDS: return safe_send(m.chat.id, "❌ অজানা কমান্ড।")
@@ -816,10 +816,10 @@ def fetch_list_ui(chat_id, user_id, cmd, message_id=None):
         data_id = u_sess.get("temp_data", {}).get(data_id_key)
     
     if not data_id:
-        success, html = navigate_to(user_id, f"https://bdris.gov.bd{config[cmd][0]}")
+        # ✅ FIX: ড্যাশবোর্ডে (/admin/) ভিজিট করে সাইডবার থেকে data_id স্ক্র্যাপ করা হচ্ছে
+        success, html = navigate_to(user_id, "https://bdris.gov.bd/admin/")
         if not success or not html: return safe_send(chat_id, "❌ পেজ লোড ব্যর্থ।")
         
-        # ✅ FIX: Specific Path Matching to avoid wrong data_id
         regex = rf'href="{re.escape(config[cmd][0])}\?data=([A-Za-z0-9_\-]+)"'
         id_match = re.search(regex, html)
         data_id = id_match.group(1) if id_match else None
@@ -900,7 +900,7 @@ def fetch_list_ui(chat_id, user_id, cmd, message_id=None):
     else: safe_send(chat_id, msg_text, reply_markup=markup, parse_mode='Markdown')
 
 # ==========================================
-# ১০. Search & UBRN Update
+# ১০. Search & UBRN Update (Modified like old code)
 # ==========================================
 def process_search_by_name(m):
     try:
@@ -970,21 +970,12 @@ def process_search_by_ubrn(m):
         res = call_api(uid, f"https://bdris.gov.bd/api/br/info/ubrn/{ubrn}")
         if res and res.status_code == 200:
             try:
-                data = res.json()
-                if not data or 'encryptedId' not in data:
-                    safe_send(m.chat.id, f"📭 `{ubrn}` এর কোনো তথ্য পাওয়া যায়নি।", parse_mode='Markdown')
-                else:
-                    name = sanitize_name(data.get('personNameBn', 'অজানা'))
-                    dob = data.get('dateOfBirth', 'N/A')
-                    fname = sanitize_name(data.get('fatherNameBn', 'N/A'))
-                    mname = sanitize_name(data.get('motherNameBn', 'N/A'))
-                    status = data.get('status', 'N/A')
-                    
-                    msg_text = f"📊 *UBRN Result:*\n\n👤 *নাম:* {name}\n🔢 *UBRN:* `{ubrn}`\n📅 *DOB:* {dob}\n👨 *পিতা:* {fname}\n👩 *মাতা:* {mname}\n🚩 *স্ট্যাটাস:* `{status}`"
-                    safe_send(m.chat.id, msg_text, parse_mode='Markdown')
+                # ✅ FIX: API থেকে আসা হুবহু JSON রেসপন্সটা দেওয়া হচ্ছে
+                formatted_json = json.dumps(res.json(), indent=2, ensure_ascii=False)
+                safe_send(m.chat.id, f"📊 *UBRN Result:*\n```json\n{formatted_json}\n```", parse_mode='Markdown')
             except Exception as e: 
                 logging.error(f"UBRN Parse Error: {e}")
-                safe_send(m.chat.id, "❌ ডেটা পার্স করা যায়নি।")
+                safe_send(m.chat.id, f"Raw Data:\n`{res.text}`", parse_mode='Markdown')
         else: 
             safe_send(m.chat.id, "❌ তথ্য পাওয়া যায়নি।")
         
