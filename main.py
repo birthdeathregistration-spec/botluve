@@ -672,6 +672,74 @@ def admin_add_balance_step(m, target_id, trxid, admin_msg_id):
 # ==========================================
 # ৮. সার্ভার পিডিএফ ও ডাউনলোড
 # ==========================================
+def download_server_by_ubrn(m):
+    try:
+        if is_cancel(m): return
+        uid, cid = m.from_user.id, m.chat.id
+        ubrn = m.text.strip() if m.text else ""
+        if not (ubrn.isdigit() and len(ubrn) == 17):
+            safe_send(cid, "❌ সঠিক ১৭ ডিজিট UBRN দিন:")
+            bot.register_next_step_handler_by_chat_id(cid, download_server_by_ubrn)
+            return
+
+        u_sess = get_session(uid)
+        working_uid = uid if u_sess.get("is_alive", False) else ADMIN_ID
+        if working_uid == ADMIN_ID and not get_session(ADMIN_ID).get("is_alive", False):
+            return safe_send(cid, "❌ সিস্টেম অফলাইন। অ্যাডমিন সেশন নেই।")
+
+        cost = get_service_cost(uid, "server_pdf_login" if working_uid == uid else "server_pdf_no_login")
+        task_id = f"dl_{uid}_{ubrn}"
+        
+        with download_lock:
+            if task_id in active_downloads: 
+                return safe_send(cid, "⚠️ অলরেডি প্রসেসিং হচ্ছে...")
+            active_downloads.add(task_id)
+        
+        if cost > 0:
+            if not deduct_balance(uid, cost):
+                with download_lock: active_downloads.discard(task_id)
+                return safe_send(cid, f"❌ পর্যাপ্ত ব্যালেন্স ({cost}৳) নেই।")
+
+        wait = safe_send(cid, f"⏳ সার্ভারে খোঁজা হচ্ছে... (চার্জ: {cost}৳)")
+        
+        def fetch_and_send():
+            try:
+                res = call_api(working_uid, f"https://bdris.gov.bd/api/br/info/ubrn/{ubrn}")
+                
+                if wait: 
+                    safe_delete(cid, wait.message_id)
+                
+                if res and res.status_code == 200 and 'encryptedId' in res.json():
+                    download_server_pdf(cid, working_uid, res.json()['encryptedId'], f"PDF_{ubrn}")
+                    safe_send(cid, f"✅ ডাউনলোড সফল! বর্তমান ব্যালেন্স: {get_balance(uid)}৳")
+                else:
+                    raise ValueError("ID Not Found")
+            except Exception as e:
+                logging.error(f"Download Fetch Error: {e}")
+                try:
+                    if wait: safe_delete(cid, wait.message_id)
+                except: pass
+                if cost > 0: 
+                    update_balance(uid, cost)
+                safe_send(cid, "❌ সার্ভার এরর বা ডেটা পাওয়া যায়নি। টাকা রিফান্ড করা হয়েছে।")
+            finally:
+                with download_lock: 
+                    active_downloads.discard(task_id)
+                
+        try:
+            Thread(target=fetch_and_send, daemon=True).start()
+        except Exception as e:
+            if cost > 0: 
+                update_balance(uid, cost)
+            with download_lock: 
+                active_downloads.discard(task_id)
+            if wait:
+                safe_delete(cid, wait.message_id)
+            safe_send(cid, "❌ সিস্টেম ওভারলোড। টাকা রিফান্ড করা হয়েছে।")
+
+    except Exception as e:
+        logging.error(f"Download Start Error: {e}")
+
 def download_server_pdf(chat_id, session_uid, enc_id, filename):
     u = get_session(session_uid)
     sess, csrf = get_active_session(u)
@@ -708,7 +776,7 @@ def download_server_pdf(chat_id, session_uid, enc_id, filename):
         raise RuntimeError("Telegram API Failed")
 
 # ==========================================
-# ৯. অ্যাপ লিস্ট লজিক ও পেজিনেশন (Modified like old code)
+# ৯. অ্যাপ লিস্ট লজিক ও পেজিনেশন
 # ==========================================
 def handle_category_init(m, cmd):
     if cmd not in VALID_CMDS: return safe_send(m.chat.id, "❌ অজানা কমান্ড।")
@@ -767,7 +835,6 @@ def fetch_list_ui(chat_id, user_id, cmd, message_id=None):
         data_id = u_sess.get("temp_data", {}).get(data_id_key)
     
     if not data_id:
-        # ✅ FIX: ড্যাশবোর্ডে (/admin/) ভিজিট করে সাইডবার থেকে data_id স্ক্র্যাপ করা হচ্ছে
         success, html = navigate_to(user_id, "https://bdris.gov.bd/admin/")
         if not success or not html: return safe_send(chat_id, "❌ পেজ লোড ব্যর্থ।")
         
@@ -851,7 +918,7 @@ def fetch_list_ui(chat_id, user_id, cmd, message_id=None):
     else: safe_send(chat_id, msg_text, reply_markup=markup, parse_mode='Markdown')
 
 # ==========================================
-# ১০. Search & UBRN Update (Modified like old code)
+# ১০. Search & UBRN Update
 # ==========================================
 def process_search_by_name(m):
     try:
@@ -921,7 +988,6 @@ def process_search_by_ubrn(m):
         res = call_api(uid, f"https://bdris.gov.bd/api/br/info/ubrn/{ubrn}")
         if res and res.status_code == 200:
             try:
-                # ✅ FIX: API থেকে আসা হুবহু JSON রেসপন্সটা দেওয়া হচ্ছে
                 formatted_json = json.dumps(res.json(), indent=2, ensure_ascii=False)
                 safe_send(m.chat.id, f"📊 *UBRN Result:*\n```json\n{formatted_json}\n```", parse_mode='Markdown')
             except Exception as e: 
@@ -1307,7 +1373,7 @@ def callback_handler(call):
                 
         Thread(target=process_recv, daemon=True).start()
 
-        elif action in ["reg", "coreg"] and mode == "CHAIRMAN":
+    elif action in ["reg", "coreg"] and mode == "CHAIRMAN":
         bot.answer_callback_query(call.id, "⏳ রেজিস্ট্রেশন হচ্ছে...")
         path = "correction-application" if action == "coreg" else "application"
         
@@ -1320,7 +1386,7 @@ def callback_handler(call):
                     ua = fresh_sess.get("ua")
                     otp_val = fresh_sess.get("ch_otp")
                 
-                # ✅ FIX: Added Referer header and Session Expiry Check
+                # ✅ FIX: Added Referer header and Session Expiry Check for Registration
                 headers = {'User-Agent': ua, 'Referer': 'https://bdris.gov.bd/admin/'}
                 res_get = ch_sess.get(f"https://bdris.gov.bd/admin/br/{path}/register?data={enc_id}", headers=headers, timeout=HTTP_TIMEOUT)
                 
@@ -1352,7 +1418,6 @@ def callback_handler(call):
                 safe_send(cid, "❌ রেজিস্ট্রেশনে এরর।")
                 
         Thread(target=process_registration, daemon=True).start()
-
 
     elif action == "print":
         perms = get_user_permissions(uid)
