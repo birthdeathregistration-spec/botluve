@@ -356,6 +356,9 @@ def generate_main_menu(chat_id, user_id=None):
         if user_id == ADMIN_ID:
             markup.row("🔑 Admin Login", "🛠️ Check Cookies", "👥 Manage Users")
     else:
+        # ✅ লগইন থাকলেও User Login বাটন দেখাবে
+        markup.row("🔑 User Login")
+        
         if is_payment_active(): markup.row("💰 My Profile & Recharge")
         markup.row("👤 নিবন্ধক সেকশন", "🧑‍💼 অথোরাইজড ইউজার")
         
