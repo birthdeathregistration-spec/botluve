@@ -672,89 +672,40 @@ def admin_add_balance_step(m, target_id, trxid, admin_msg_id):
 # ==========================================
 # ৮. সার্ভার পিডিএফ ও ডাউনলোড
 # ==========================================
-def download_server_by_ubrn(m):
-    try:
-        if is_cancel(m): return
-        uid, cid = m.from_user.id, m.chat.id
-        ubrn = m.text.strip() if m.text else ""
-        if not (ubrn.isdigit() and len(ubrn) == 17):
-            safe_send(cid, "❌ সঠিক ১৭ ডিজিট UBRN দিন:")
-            bot.register_next_step_handler_by_chat_id(cid, download_server_by_ubrn)
-            return
-
-        u_sess = get_session(uid)
-        working_uid = uid if u_sess.get("is_alive", False) else ADMIN_ID
-        if working_uid == ADMIN_ID and not get_session(ADMIN_ID).get("is_alive", False):
-            return safe_send(cid, "❌ সিস্টেম অফলাইন। অ্যাডমিন সেশন নেই।")
-
-        cost = get_service_cost(uid, "server_pdf_login" if working_uid == uid else "server_pdf_no_login")
-        task_id = f"dl_{uid}_{ubrn}"
-        
-        with download_lock:
-            if task_id in active_downloads: 
-                return safe_send(cid, "⚠️ অলরেডি প্রসেসিং হচ্ছে...")
-            active_downloads.add(task_id)
-        
-        if cost > 0:
-            if not deduct_balance(uid, cost):
-                with download_lock: active_downloads.discard(task_id)
-                return safe_send(cid, f"❌ পর্যাপ্ত ব্যালেন্স ({cost}৳) নেই।")
-
-        wait = safe_send(cid, f"⏳ সার্ভারে খোঁজা হচ্ছে... (চার্জ: {cost}৳)")
-        
-        def fetch_and_send():
-            try:
-                res = call_api(working_uid, f"https://bdris.gov.bd/api/br/info/ubrn/{ubrn}")
-                
-                if wait: 
-                    safe_delete(cid, wait.message_id)
-                
-                if res and res.status_code == 200 and 'encryptedId' in res.json():
-                    download_server_pdf(cid, working_uid, res.json()['encryptedId'], f"PDF_{ubrn}")
-                    safe_send(cid, f"✅ ডাউনলোড সফল! বর্তমান ব্যালেন্স: {get_balance(uid)}৳")
-                else:
-                    raise ValueError("ID Not Found")
-            except Exception as e:
-                logging.error(f"Download Fetch Error: {e}")
-                try:
-                    if wait: safe_delete(cid, wait.message_id)
-                except: pass
-                if cost > 0: 
-                    update_balance(uid, cost)
-                safe_send(cid, "❌ সার্ভার এরর বা ডেটা পাওয়া যায়নি। টাকা রিফান্ড করা হয়েছে।")
-            finally:
-                with download_lock: 
-                    active_downloads.discard(task_id)
-                
-        try:
-            Thread(target=fetch_and_send, daemon=True).start()
-        except Exception as e:
-            if cost > 0: 
-                update_balance(uid, cost)
-            with download_lock: 
-                active_downloads.discard(task_id)
-            if wait:
-                safe_delete(cid, wait.message_id)
-            safe_send(cid, "❌ সিস্টেম ওভারলোড। টাকা রিফান্ড করা হয়েছে।")
-
-    except Exception as e:
-        logging.error(f"Download Start Error: {e}")
-
 def download_server_pdf(chat_id, session_uid, enc_id, filename):
     u = get_session(session_uid)
-    sess, _ = get_active_session(u)
-    safe_send(chat_id, "📥 পিডিএফ জেনারেট হচ্ছে...")
-    sess.get(f"https://bdris.gov.bd/admin/new-certificate/check?data={enc_id}", timeout=HTTP_TIMEOUT)
-    res = sess.get(f"https://bdris.gov.bd/admin/new-certificate/print?data={enc_id}", timeout=HTTP_TIMEOUT)
+    sess, csrf = get_active_session(u)
     
-    if 'application/pdf' in res.headers.get('Content-Type', ''):
-        try:
+    with session_lock:
+        ua = u.get("ua", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        
+    safe_send(chat_id, "📥 পিডিএফ জেনারেট হচ্ছে (একটু সময় লাগতে পারে)...")
+    
+    # ✅ FIX: Missing headers restored for PDF generation
+    check_headers = {
+        'User-Agent': ua, 
+        'Referer': 'https://bdris.gov.bd/admin/',
+        'x-csrf-token': csrf, 
+        'x-requested-with': 'XMLHttpRequest', 
+        'client': 'bris'
+    }
+    
+    try:
+        sess.get(f"https://bdris.gov.bd/admin/new-certificate/check?data={enc_id}", headers=check_headers, timeout=HTTP_TIMEOUT)
+        
+        print_headers = {
+            'User-Agent': ua, 
+            'Referer': 'https://bdris.gov.bd/admin/'
+        }
+        res = sess.get(f"https://bdris.gov.bd/admin/new-certificate/print?data={enc_id}", headers=print_headers, timeout=180)
+        
+        if 'application/pdf' in res.headers.get('Content-Type', ''):
             bot.send_document(chat_id, io.BytesIO(res.content), visible_file_name=f"{filename}.pdf")
-        except Exception as e:
-            logging.error(f"Telegram Document Send Failed: {e}")
-            raise RuntimeError("Telegram API Failed")
-    else:
-        raise ValueError("Invalid Content-Type from Server")
+        else:
+            raise ValueError("Invalid Content-Type from Server")
+    except Exception as e:
+        logging.error(f"Telegram Document Send Failed: {e}")
+        raise RuntimeError("Telegram API Failed")
 
 # ==========================================
 # ৯. অ্যাপ লিস্ট লজিক ও পেজিনেশন (Modified like old code)
@@ -1356,7 +1307,7 @@ def callback_handler(call):
                 
         Thread(target=process_recv, daemon=True).start()
 
-    elif action in ["reg", "coreg"] and mode == "CHAIRMAN":
+        elif action in ["reg", "coreg"] and mode == "CHAIRMAN":
         bot.answer_callback_query(call.id, "⏳ রেজিস্ট্রেশন হচ্ছে...")
         path = "correction-application" if action == "coreg" else "application"
         
@@ -1369,7 +1320,15 @@ def callback_handler(call):
                     ua = fresh_sess.get("ua")
                     otp_val = fresh_sess.get("ch_otp")
                 
-                html = ch_sess.get(f"https://bdris.gov.bd/admin/br/{path}/register?data={enc_id}", headers={'User-Agent': ua}, timeout=HTTP_TIMEOUT).text
+                # ✅ FIX: Added Referer header and Session Expiry Check
+                headers = {'User-Agent': ua, 'Referer': 'https://bdris.gov.bd/admin/'}
+                res_get = ch_sess.get(f"https://bdris.gov.bd/admin/br/{path}/register?data={enc_id}", headers=headers, timeout=HTTP_TIMEOUT)
+                
+                if "login" in res_get.url.lower():
+                    safe_send(cid, "❌ নিবন্ধক (CH) সেশন এক্সপায়ার হয়েছে। দয়া করে আবার লগইন করুন।")
+                    return
+                    
+                html = res_get.text
                 v = re.search(r'<option\s+value="(\d{17})"[^>]*>([^<]+)</option>', html)
                 if v:
                     _, active_csrf = get_active_session(fresh_sess)
@@ -1385,14 +1344,15 @@ def callback_handler(call):
                     if res and res.status_code == 200: 
                         safe_send(cid, "✅ রেজিস্ট্রেশন সফল!")
                     else: 
-                        safe_send(cid, "❌ রেজিস্ট্রেশন ব্যর্থ।")
+                        safe_send(cid, "❌ রেজিস্ট্রেশন ব্যর্থ। সার্ভার রেসপন্স করেনি।")
                 else: 
-                    safe_send(cid, "❌ ভেরিফায়ার পাওয়া যায়নি।")
+                    safe_send(cid, "❌ ভেরিফায়ার পাওয়া যায়নি। সার্ভারে ডেটা নেই।")
             except Exception as e:
                 logging.error(f"Registration Error: {e}")
                 safe_send(cid, "❌ রেজিস্ট্রেশনে এরর।")
                 
         Thread(target=process_registration, daemon=True).start()
+
 
     elif action == "print":
         perms = get_user_permissions(uid)
