@@ -1,4 +1,56 @@
-pyTelegramBotAPI
-requests
-Flask
-pymongo
+# BDRIS Bot - Python Dependencies
+# Production Ready Version
+
+# Core Bot Framework
+pyTelegramBotAPI==4.14.0
+
+# HTTP & Web Requests
+requests==2.31.0
+
+# Database
+pymongo==4.6.0
+
+# Web Framework
+Flask==3.0.0
+Werkzeug==3.0.1
+
+# Utilities
+python-dotenv==1.0.0
+
+# JSON handling (built-in, but explicitly listed for clarity)
+# json - built-in
+
+# Threading (built-in)
+# threading - built-in
+
+# Logging (built-in)
+# logging - built-in
+
+# Regular expressions (built-in)
+# re - built-in
+
+# System utilities (built-in)
+# os, sys - built-in
+
+# DateTime (built-in)
+# datetime - built-in
+
+# URL parsing (built-in)
+# urllib.parse - built-in
+
+# Collections (built-in)
+# collections - built-in
+
+# Hash utilities (built-in)
+# hashlib - built-in
+
+# Optional but Recommended for Production
+gunicorn==21.2.0  # Production WSGI server
+python-json-logger==2.0.7  # Structured logging
+
+# Development & Testing (optional)
+# pytest==7.4.3
+# pytest-asyncio==0.21.1
+# black==23.12.1
+# flake8==6.1.0
+# pylint==3.0.3
