@@ -1460,7 +1460,7 @@ if __name__ == "__main__":
     logging.info("✅ Polling...")
     while True:
         try: 
-            bot.infinity_polling(timeout=20, request_timeout=30, long_polling_timeout=20)
+            bot.infinity_pollingbot.infinity_polling(timeout=20, long_polling_timeout=20)
         except requests.exceptions.ReadTimeout:
             logging.warning("⚠️ Telegram Network Timeout, Restarting Polling...")
             time.sleep(2)
