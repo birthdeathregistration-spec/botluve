@@ -381,7 +381,6 @@ def generate_main_menu(chat_id, user_id=None):
             markup.row("🔑 Admin Login", "🛠️ Check Cookies", "👥 Manage Users")
             
     return markup
-
 # ==========================================
 # ৫. কোর API রিকোয়েস্ট ফাংশন
 # ==========================================
