@@ -25,7 +25,7 @@ session_lock = threading.Lock()
 download_lock = threading.Lock()
 active_downloads = set()
 
-# প্রি-কম্পাইল্ড রেজেক্স (Super Flexible for Cookies)
+# প্রি-কম্পাইল্ড রেজেক্স (পারফরম্যান্স বুস্ট)
 _COOKIE_RE = re.compile(r'SESSION\s*[:=]?\s*([A-Za-z0-9_-]+)', re.I)
 _TS_RE = re.compile(r'TS01[A-Za-z0-9]*\s*[:=]?\s*([A-Za-z0-9_-]+)', re.I)
 _CSRF_RE = re.compile(r'name="_csrf"\s+content="([^"]+)"')
@@ -264,7 +264,8 @@ def is_rate_limited(user_id):
     is_limited = False
     
     with session_lock:
-        if now - u_sess.get("last_action_time", now) < 1.5:
+        # ✅ রেট লিমিট ০.৮ সেকেন্ড করা হয়েছে
+        if now - u_sess.get("last_action_time", now) < 0.8:
             is_limited = True
             if now - u_sess.get("last_warning_time", 0) > 5:
                 u_sess["last_warning_time"] = now
@@ -273,7 +274,7 @@ def is_rate_limited(user_id):
             u_sess["last_action_time"] = now
             
     if trigger_warning:
-        safe_send(user_id, "⚠️ *একটু ধীরে!* ২ সেকেন্ড অপেক্ষা করুন।", parse_mode="Markdown")
+        safe_send(user_id, "⚠️ *একটু ধীরে!* স্প্যামিং থেকে বাঁচতে ০.৮ সেকেন্ড অপেক্ষা করুন।", parse_mode="Markdown")
         
     return is_limited
 
@@ -294,28 +295,36 @@ def generate_main_menu(chat_id, user_id=None):
     u_sess = get_session(user_id)
     perms = get_user_permissions(user_id)
 
-    markup.row("🔑 User Login")
-    if not u_sess["is_alive"] and (perms.get("server_pdf") or user_id == ADMIN_ID):
-        markup.row("🖨️ Server PDF Print")
-        if is_payment_active(): markup.row("💰 My Profile & Recharge")
-
-    if u_sess["is_alive"]:
+    if not u_sess["is_alive"]:
+        markup.row("🔑 User Login")
+        if perms.get("server_pdf") or user_id == ADMIN_ID:
+            markup.row("🖨️ Server PDF Print")
+        if is_payment_active(): 
+            markup.row("💰 My Profile & Recharge")
+        if user_id == ADMIN_ID:
+            markup.row("🔑 Admin Login", "🛠️ Check Cookies", "👥 Manage Users")
+    else:
         if is_payment_active(): markup.row("💰 My Profile & Recharge")
         markup.row("👤 নিবন্ধক সেকশন", "🧑‍💼 অথোরাইজড ইউজার")
+        
         row_core = []
         if perms.get("apps") or user_id == ADMIN_ID: row_core.append("📋 Applications")
         if perms.get("corr") or user_id == ADMIN_ID: row_core.append("📝 Correction")
         if perms.get("repr") or user_id == ADMIN_ID: row_core.append("🔄 Reprint")
         if row_core: markup.row(*row_core)
+        
         row_search = ["🏠 Dashboard"]
         if perms.get("search") or user_id == ADMIN_ID: row_search.extend(["🌐 Search By Name", "🔢 Search By UBRN"])
         markup.row(*row_search)
+        
         row_tools = []
         if perms.get("ubrn_update") or user_id == ADMIN_ID: row_tools.append("👨‍👩‍👦 পিতা-মাতার UBRN হালনাগাদ")
         if perms.get("server_pdf") or user_id == ADMIN_ID: row_tools.append("🖨️ Server PDF Print")
         if row_tools: markup.row(*row_tools)
 
-    if user_id == ADMIN_ID: markup.row("🔑 Admin Login", "🛠️ Check Cookies", "👥 Manage Users")
+        if user_id == ADMIN_ID:
+            markup.row("🔑 Admin Login", "🛠️ Check Cookies", "👥 Manage Users")
+            
     return markup
 
 # ==========================================
@@ -324,24 +333,20 @@ def generate_main_menu(chat_id, user_id=None):
 def extract_sid_tsid(text):
     """ Smart and flexible extraction for Session and TS cookies """
     text = text.strip()
-    
-    # Step 1: Try flexible Regex match first
     s = _COOKIE_RE.search(text)
     t = _TS_RE.search(text)
+    
     if s and t:
         return s.group(1), t.group(1)
         
-    # Step 2: Ultimate Fallback (if user just pasted two long strings blindly)
     tokens = [tok.strip() for tok in re.split(r'[\s;,"\'\n\r]+', text) if len(tok.strip()) >= 15]
     if len(tokens) >= 2:
-        # 'TS' token is usually longer and often starts with '01'
         if tokens[1].startswith('01') or len(tokens[1]) > len(tokens[0]):
             return tokens[0], tokens[1]
         elif tokens[0].startswith('01'):
             return tokens[1], tokens[0]
         else:
             return tokens[0], tokens[1]
-            
     return None, None
 
 def get_active_session(u_sess):
@@ -1047,7 +1052,7 @@ def callback_handler(call):
                     save_session_to_db(uid, u_sess)
                     safe_send(cid, f"✅ পেমেন্ট সফল! {cost}৳ কাটা হয়েছে।" if cost > 0 else "✅ পেমেন্ট সফল!")
                 else:
-                    if cost > 0: update_balance(uid, cost) # Refund
+                    if cost > 0: update_balance(uid, cost)
                     safe_send(cid, "❌ পেমেন্ট ব্যর্থ! রিফান্ড করা হয়েছে।")
             finally:
                 with download_lock: active_downloads.discard(task_id)
@@ -1073,7 +1078,14 @@ def callback_handler(call):
                 v = re.search(r'<option\s+value="(\d{17})"[^>]*>([^<]+)</option>', html)
                 if v:
                     _, active_csrf = get_active_session(u_sess)
-                    payload = {"birthPlaceAndDobVerifierName": v.group(2).strip(), "birthPlaceAndDobVerifierBrn": v.group(1), "birthPlaceAndDobVerificationDate": datetime.now().strftime("%d/%m/%Y"), "otp": u_sess["ch_otp"], "data": enc_id, "_csrf": active_csrf}
+                    payload = {
+                        "birthPlaceAndDobVerifierName": v.group(2).strip(), 
+                        "birthPlaceAndDobVerifierBrn": v.group(1), 
+                        "birthPlaceAndDobVerificationDate": datetime.now().strftime("%d/%m/%Y"), 
+                        "otp": u_sess["ch_otp"], 
+                        "data": enc_id, 
+                        "_csrf": active_csrf
+                    }
                     res = call_api(uid, f"https://bdris.gov.bd/api/br/{path}/register", method="POST", data=payload)
                     if res and res.status_code == 200: safe_send(cid, "✅ রেজিস্ট্রেশন সফল!")
                     else: safe_send(cid, "❌ রেজিস্ট্রেশন ব্যর্থ।")
@@ -1107,7 +1119,7 @@ def callback_handler(call):
                     download_server_pdf(cid, working_uid, enc_id, f"Cert_{sid}")
                     safe_send(cid, f"✅ ডাউনলোড সফল! ব্যালেন্স: {get_balance(uid)}৳" if cost > 0 else "✅ ডাউনলোড সফল!")
                 except Exception as e:
-                    if cost > 0: update_balance(uid, cost) # Centralized refund
+                    if cost > 0: update_balance(uid, cost)
                     safe_send(cid, "❌ এরর বা সার্ভার ডাউন। রিফান্ড করা হয়েছে।")
                 finally:
                     with download_lock: active_downloads.discard(task_id)
