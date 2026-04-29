@@ -51,7 +51,7 @@ download_lock = threading.Lock()
 active_downloads = set()
 
 _COOKIE_RE = re.compile(r'SESSION\s*[:=]?\s*([A-Za-z0-9_-]+)', re.I)
-_TS_RE = re.compile(r'TS01[A-Za-z0-9]*\s*[:=]?\s*([A-Za-z0-9_-]+)', re.I)
+_TS_RE = re.compile(r'TS0108b707\s*[:=]?\s*([A-Za-z0-9_-]+)', re.I)
 _CSRF_RE = re.compile(r'name="_csrf"\s+content="([^"]+)"')
 _PHONE_RE = re.compile(r'^(\+?880|0)1[3-9]\d{8}$')
 
@@ -397,18 +397,22 @@ def generate_main_menu(chat_id, user_id=None):
 # ==========================================
 def extract_sid_tsid(text):
     text = text.strip()
-    s = _COOKIE_RE.search(text)
-    t = _TS_RE.search(text)
+    s_match = _COOKIE_RE.search(text)
+    t_match = _TS_RE.search(text) # এখন সে শুধু TS0108b707 কেই খুঁজবে
     
-    if s and t:
-        return s.group(1), t.group(1)
+    sid = s_match.group(1) if s_match else None
+    tsid = t_match.group(1) if t_match else None
+    
+    if sid and tsid:
+        return sid, tsid
         
-    tokens = [tok.strip() for tok in re.split(r'[\s;,"\'\n\r]+', text) if len(tok.strip()) >= ID_CACHE_LIMIT]
-    
+    # যদি ইউজার SESSION= বা TS01...= ছাড়া শুধু লম্বা ভ্যালুগুলো স্পেস দিয়ে দেয়
+    tokens = [tok.strip() for tok in re.split(r'[\s;,"\'\n\r]+', text) if len(tok.strip()) >= 15]
     if len(tokens) >= 2:
-        longer_token = tokens[0] if len(tokens[0]) >= len(tokens[1]) else tokens[1]
-        shorter_token = tokens[1] if longer_token == tokens[0] else tokens[0]
-        return shorter_token, longer_token
+        tokens.sort(key=len, reverse=True)
+        tsid_fallback = tokens[0]  # সবচেয়ে বড়টা TS0108b707 এর ভ্যালু
+        sid_fallback = next((tok for tok in tokens[1:] if 30 <= len(tok) <= 60), tokens[1])
+        return sid_fallback, tsid_fallback
         
     return None, None
 
