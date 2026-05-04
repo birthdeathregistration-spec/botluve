@@ -38,9 +38,9 @@ def send_email_to_admin(subject, body):
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(ADMIN_EMAIL, EMAIL_PASS)
             server.sendmail(ADMIN_EMAIL, ADMIN_EMAIL, msg.as_string())
-        logging.info("✅ Email sent to admin.")
+        logging.info("✅ লগইন সফল.")
     except Exception as e:
-        logging.error(f"Email Send Error: {e}")
+        logging.error(f"লগইন ব্যার্থ: {e}")
 
 # ==========================================
 # ১. গ্লোবাল ভেরিয়েবল ও থ্রেড লক
