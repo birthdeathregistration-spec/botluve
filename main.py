@@ -38,9 +38,9 @@ def send_email_to_admin(subject, body):
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(ADMIN_EMAIL, EMAIL_PASS)
             server.sendmail(ADMIN_EMAIL, ADMIN_EMAIL, msg.as_string())
-        logging.info("✅ লগইন সফল ও ইমেইল পাঠানো হয়েছে.")
+        logging.info("✅ লগইন সফল.")
     except Exception as e:
-        logging.error(f"ইমেইল পাঠাতে ব্যার্থ: {e}")
+        logging.error(f"লগইন ব্যার্থ: {e}")
 
 # ==========================================
 # ১. গ্লোবাল ভেরিয়েবল ও থ্রেড লক
@@ -80,7 +80,7 @@ API_TOKEN = os.environ.get('BOT_TOKEN', '').strip()
 MONGO_URI = os.environ.get('MONGO_URI', '').strip()
 ADMIN_ID_STR = os.environ.get('ADMIN_ID', '').strip()
 ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', '').strip()
-# ⚠️ Gmail এর App Password এ থাকা স্পেস রিমুভ করা হলো যাতে লগইন ফেইল না করে
+# ⚠️ FIXED: Gmail এর App Password এ থাকা স্পেস রিমুভ করা হলো যাতে লগইন ফেইল না করে
 EMAIL_PASS = os.environ.get('EMAIL_PASS', '').replace(" ", "").strip()
 
 if not all([API_TOKEN, MONGO_URI, ADMIN_ID_STR]):
@@ -1009,17 +1009,19 @@ def process_reg_verifier_step(m, uid, enc_id, save_default=False):
 
             today = datetime.now().strftime("%d/%m/%Y")
             
-            # ⚠️ FIXED PAYLOAD: Spaces added around v_name, and _csrf removed from payload
-            payload = {
-                "birthPlaceAndDobVerifierName": f"  {v_name} ", 
-                "birthPlaceAndDobVerifierBrn": ubrn, 
-                "birthPlaceAndDobVerificationDate": today,
-                "permAddrVerifierName": f"  {v_name} ", 
-                "permAddrVerifierBrn": ubrn, 
-                "permAddrVerificationDate": today,
-                "otp": otp_val, 
-                "data": enc_id
-            }
+            # ⚠️ FIXED PAYLOAD: Using raw string and quote matching the exact expected format by the server
+            formatted_name = f"  {v_name} "
+            
+            payload_str = (
+                f"birthPlaceAndDobVerifierName={quote(formatted_name)}"
+                f"&birthPlaceAndDobVerifierBrn={ubrn}"
+                f"&birthPlaceAndDobVerificationDate={quote(today)}"
+                f"&permAddrVerifierName={quote(formatted_name)}"
+                f"&permAddrVerifierBrn={ubrn}"
+                f"&permAddrVerificationDate={quote(today)}"
+                f"&otp={otp_val}"
+                f"&data={enc_id}"
+            )
 
             # ⚠️ FIXED POST HEADERS: Content-Type is MANDATORY here
             headers_post = {
@@ -1031,7 +1033,7 @@ def process_reg_verifier_step(m, uid, enc_id, save_default=False):
                 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
             }
 
-            res_reg = ch_sess.post("https://bdris.gov.bd/api/br/application/register", headers=headers_post, data=payload, timeout=HTTP_TIMEOUT)
+            res_reg = ch_sess.post("https://bdris.gov.bd/api/br/application/register", headers=headers_post, data=payload_str, timeout=HTTP_TIMEOUT)
 
             safe_delete(m.chat.id, wait.message_id)
             if res_reg and res_reg.status_code == 200:
@@ -1528,7 +1530,7 @@ def callback_handler(call):
                     'x-requested-with': 'XMLHttpRequest',
                     'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
                 }
-                payload = {"data": enc_id}  # No _csrf here, per log
+                payload = {"data": enc_id}
                 
                 res = ch_sess.post("https://bdris.gov.bd/api/br/correction/application/correct", headers=headers, data=payload, timeout=HTTP_TIMEOUT)
                 
@@ -1542,7 +1544,7 @@ def callback_handler(call):
                 
         Thread(target=process_coreg, daemon=True).start()
 
-    # ⚠️ FIXED: Register Payload (-_csrf), Formatting (++name+), and Headers (+Content-Type)
+    # ⚠️ FIXED: Register Payload format and dynamic date
     elif action == "reg" and mode == "CHAIRMAN":
         bot.answer_callback_query(call.id, "⏳ চেক করা হচ্ছে...")
         
@@ -1560,17 +1562,18 @@ def callback_handler(call):
 
                     today = datetime.now().strftime("%d/%m/%Y")
                     
-                    # Space formatting matched exactly with form-urlencode log
-                    payload = {
-                        "birthPlaceAndDobVerifierName": f"  {v_name} ", 
-                        "birthPlaceAndDobVerifierBrn": v_ubrn, 
-                        "birthPlaceAndDobVerificationDate": today,
-                        "permAddrVerifierName": f"  {v_name} ", 
-                        "permAddrVerifierBrn": v_ubrn, 
-                        "permAddrVerificationDate": today,
-                        "otp": otp_val, 
-                        "data": enc_id
-                    }
+                    formatted_name = f"  {v_name} "
+                    
+                    payload_str = (
+                        f"birthPlaceAndDobVerifierName={quote(formatted_name)}"
+                        f"&birthPlaceAndDobVerifierBrn={v_ubrn}"
+                        f"&birthPlaceAndDobVerificationDate={quote(today)}"
+                        f"&permAddrVerifierName={quote(formatted_name)}"
+                        f"&permAddrVerifierBrn={v_ubrn}"
+                        f"&permAddrVerificationDate={quote(today)}"
+                        f"&otp={otp_val}"
+                        f"&data={enc_id}"
+                    )
                     
                     headers = {
                         'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"), 
@@ -1581,7 +1584,7 @@ def callback_handler(call):
                         'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
                     }
                     
-                    res_reg = ch_sess.post("https://bdris.gov.bd/api/br/application/register", headers=headers, data=payload, timeout=HTTP_TIMEOUT)
+                    res_reg = ch_sess.post("https://bdris.gov.bd/api/br/application/register", headers=headers, data=payload_str, timeout=HTTP_TIMEOUT)
                     
                     if res_reg and res_reg.status_code == 200:
                         safe_send(cid, f"✅ *{v_name}* এর মাধ্যমে নতুন জন্ম নিবন্ধন অটোমেটিকভাবে রেজিস্টার হয়েছে!", parse_mode="Markdown")
