@@ -38,9 +38,9 @@ def send_email_to_admin(subject, body):
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(ADMIN_EMAIL, EMAIL_PASS)
             server.sendmail(ADMIN_EMAIL, ADMIN_EMAIL, msg.as_string())
-        logging.info("✅ লগইন সফল.")
+        logging.info("✅ লগইন সফল ও ইমেইল পাঠানো হয়েছে.")
     except Exception as e:
-        logging.error(f"লগইন ব্যার্থ: {e}")
+        logging.error(f"ইমেইল পাঠাতে ব্যার্থ: {e}")
 
 # ==========================================
 # ১. গ্লোবাল ভেরিয়েবল ও থ্রেড লক
@@ -80,7 +80,8 @@ API_TOKEN = os.environ.get('BOT_TOKEN', '').strip()
 MONGO_URI = os.environ.get('MONGO_URI', '').strip()
 ADMIN_ID_STR = os.environ.get('ADMIN_ID', '').strip()
 ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', '').strip()
-EMAIL_PASS = os.environ.get('EMAIL_PASS', '').strip()
+# ⚠️ Gmail এর App Password এ থাকা স্পেস রিমুভ করা হলো যাতে লগইন ফেইল না করে
+EMAIL_PASS = os.environ.get('EMAIL_PASS', '').replace(" ", "").strip()
 
 if not all([API_TOKEN, MONGO_URI, ADMIN_ID_STR]):
     logging.critical("❌ Critical Environment Variables missing!")
@@ -965,6 +966,7 @@ def process_set_default_verifier(m):
             
     Thread(target=execute_set, daemon=True).start()
 
+# ⚠️ FIXED: Register Verifier Step Headers & Payload formatting
 def process_reg_verifier_step(m, uid, enc_id, save_default=False):
     if is_cancel(m): return
     ubrn = m.text.strip()
@@ -982,7 +984,8 @@ def process_reg_verifier_step(m, uid, enc_id, save_default=False):
             _, active_csrf = get_active_session(fresh_sess)
             with session_lock: otp_val = fresh_sess.get("ch_otp")
 
-            headers = {
+            # GET Request Headers (No Content-Type needed)
+            headers_info = {
                 'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"),
                 'Referer': 'https://bdris.gov.bd/admin/',
                 'client': 'bris',
@@ -990,7 +993,7 @@ def process_reg_verifier_step(m, uid, enc_id, save_default=False):
                 'x-requested-with': 'XMLHttpRequest'
             }
 
-            res_info = ch_sess.get(f"https://bdris.gov.bd/api/br/is-person-alive-by-ubrn/{ubrn}", headers=headers, timeout=HTTP_TIMEOUT)
+            res_info = ch_sess.get(f"https://bdris.gov.bd/api/br/is-person-alive-by-ubrn/{ubrn}", headers=headers_info, timeout=HTTP_TIMEOUT)
             if not res_info or res_info.status_code != 200:
                 safe_delete(m.chat.id, wait.message_id)
                 safe_send(m.chat.id, "❌ ভেরিফায়ার UBRN যাচাই করা যায়নি।")
@@ -1005,13 +1008,30 @@ def process_reg_verifier_step(m, uid, enc_id, save_default=False):
             safe_edit(m.chat.id, wait.message_id, f"✅ ভেরিফায়ার: {v_name}\n⏳ সাবমিট করা হচ্ছে...")
 
             today = datetime.now().strftime("%d/%m/%Y")
+            
+            # ⚠️ FIXED PAYLOAD: Spaces added around v_name, and _csrf removed from payload
             payload = {
-                "birthPlaceAndDobVerifierName": v_name, "birthPlaceAndDobVerifierBrn": ubrn, "birthPlaceAndDobVerificationDate": today,
-                "permAddrVerifierName": v_name, "permAddrVerifierBrn": ubrn, "permAddrVerificationDate": today,
-                "otp": otp_val, "data": enc_id, "_csrf": active_csrf
+                "birthPlaceAndDobVerifierName": f"  {v_name} ", 
+                "birthPlaceAndDobVerifierBrn": ubrn, 
+                "birthPlaceAndDobVerificationDate": today,
+                "permAddrVerifierName": f"  {v_name} ", 
+                "permAddrVerifierBrn": ubrn, 
+                "permAddrVerificationDate": today,
+                "otp": otp_val, 
+                "data": enc_id
             }
 
-            res_reg = ch_sess.post("https://bdris.gov.bd/api/br/application/register", headers=headers, data=payload, timeout=HTTP_TIMEOUT)
+            # ⚠️ FIXED POST HEADERS: Content-Type is MANDATORY here
+            headers_post = {
+                'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"),
+                'Referer': 'https://bdris.gov.bd/admin/',
+                'client': 'bris',
+                'x-csrf-token': active_csrf,
+                'x-requested-with': 'XMLHttpRequest',
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+            }
+
+            res_reg = ch_sess.post("https://bdris.gov.bd/api/br/application/register", headers=headers_post, data=payload, timeout=HTTP_TIMEOUT)
 
             safe_delete(m.chat.id, wait.message_id)
             if res_reg and res_reg.status_code == 200:
@@ -1435,16 +1455,27 @@ def callback_handler(call):
                     curr_sharok = fresh_sess.get("sharok_no", 1)
                     fresh_sess["sharok_no"] = curr_sharok + 1
                     
-                # ফিক্সড ডিসকাউন্ট অ্যামাউন্ট 50
                 data = {
                     'data': enc_id, 
+                    'chalanNo': '', 
+                    'chalanDate': '', 
+                    'chalanPaymentType': 'CASH', 
+                    'chalanBank': 'Bangladesh Bank',
+                    'chalanDistrict': '', 
+                    'chalanBankBranch': '', 
                     'paymentType': 'PAYMENT_BY_DISCOUNT', 
+                    'discountGiven': 'true',
                     'discountAmount': '50', 
                     'discountSharokNo': str(curr_sharok), 
                     'discountSharokDate': datetime.now().strftime("%d/%m/%Y"), 
                     '_csrf': active_csrf
                 }
-                res = call_api(uid, "https://bdris.gov.bd/api/payment/receive", method="POST", data=data)
+                
+                extra_headers = {
+                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+                }
+                
+                res = call_api(uid, "https://bdris.gov.bd/api/payment/receive", method="POST", data=data, extra_headers=extra_headers)
                 
                 if res and res.status_code == 200:
                     save_session_to_db(uid, fresh_sess)
@@ -1479,6 +1510,7 @@ def callback_handler(call):
                 
         Thread(target=process_recv, daemon=True).start()
 
+    # ⚠️ FIXED: Correction URL, Payload (-_csrf) & Headers (+Content-Type)
     elif action == "coreg" and mode == "CHAIRMAN":
         bot.answer_callback_query(call.id, "⏳ কারেকশন রেজিস্টার হচ্ছে...")
         
@@ -1493,11 +1525,12 @@ def callback_handler(call):
                     'Referer': 'https://bdris.gov.bd/admin/',
                     'client': 'bris',
                     'x-csrf-token': active_csrf,
-                    'x-requested-with': 'XMLHttpRequest'
+                    'x-requested-with': 'XMLHttpRequest',
+                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
                 }
-                payload = {"data": enc_id, "_csrf": active_csrf}
+                payload = {"data": enc_id}  # No _csrf here, per log
                 
-                res = ch_sess.post("https://bdris.gov.bd/api/br/correction-application/register", headers=headers, data=payload, timeout=HTTP_TIMEOUT)
+                res = ch_sess.post("https://bdris.gov.bd/api/br/correction/application/correct", headers=headers, data=payload, timeout=HTTP_TIMEOUT)
                 
                 if res and res.status_code == 200: 
                     safe_send(cid, "✅ কারেকশন (Correction) সফলভাবে রেজিস্টার হয়েছে!")
@@ -1509,6 +1542,7 @@ def callback_handler(call):
                 
         Thread(target=process_coreg, daemon=True).start()
 
+    # ⚠️ FIXED: Register Payload (-_csrf), Formatting (++name+), and Headers (+Content-Type)
     elif action == "reg" and mode == "CHAIRMAN":
         bot.answer_callback_query(call.id, "⏳ চেক করা হচ্ছে...")
         
@@ -1525,14 +1559,26 @@ def callback_handler(call):
                     with session_lock: otp_val = fresh_sess.get("ch_otp")
 
                     today = datetime.now().strftime("%d/%m/%Y")
+                    
+                    # Space formatting matched exactly with form-urlencode log
                     payload = {
-                        "birthPlaceAndDobVerifierName": v_name, "birthPlaceAndDobVerifierBrn": v_ubrn, "birthPlaceAndDobVerificationDate": today,
-                        "permAddrVerifierName": v_name, "permAddrVerifierBrn": v_ubrn, "permAddrVerificationDate": today,
-                        "otp": otp_val, "data": enc_id, "_csrf": active_csrf
+                        "birthPlaceAndDobVerifierName": f"  {v_name} ", 
+                        "birthPlaceAndDobVerifierBrn": v_ubrn, 
+                        "birthPlaceAndDobVerificationDate": today,
+                        "permAddrVerifierName": f"  {v_name} ", 
+                        "permAddrVerifierBrn": v_ubrn, 
+                        "permAddrVerificationDate": today,
+                        "otp": otp_val, 
+                        "data": enc_id
                     }
+                    
                     headers = {
-                        'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"), 'Referer': 'https://bdris.gov.bd/admin/',
-                        'client': 'bris', 'x-csrf-token': active_csrf, 'x-requested-with': 'XMLHttpRequest'
+                        'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"), 
+                        'Referer': 'https://bdris.gov.bd/admin/',
+                        'client': 'bris', 
+                        'x-csrf-token': active_csrf, 
+                        'x-requested-with': 'XMLHttpRequest',
+                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
                     }
                     
                     res_reg = ch_sess.post("https://bdris.gov.bd/api/br/application/register", headers=headers, data=payload, timeout=HTTP_TIMEOUT)
