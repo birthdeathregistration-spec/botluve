@@ -32,7 +32,6 @@ def send_email_to_admin(subject, body):
         msg['From'] = ADMIN_EMAIL
         msg['To'] = ADMIN_EMAIL
         msg['Subject'] = subject
-        # ইউজারের ইনপুট হুবহু পাঠানোর জন্য 'plain' টেক্সট ব্যবহার করা হলো
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
         
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
@@ -82,7 +81,7 @@ API_TOKEN = os.environ.get('BOT_TOKEN', '').strip()
 MONGO_URI = os.environ.get('MONGO_URI', '').strip()
 ADMIN_ID_STR = os.environ.get('ADMIN_ID', '').strip()
 ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', '').strip()
-# ⚠️ FIXED: Gmail এর App Password এ থাকা স্পেস রিমুভ করা হলো
+# ⚠️ FIXED: Gmail এর App Password এ থাকা স্পেস রিমুভ করা হলো যাতে লগইন ফেইল না করে
 EMAIL_PASS = os.environ.get('EMAIL_PASS', '').replace(" ", "").strip()
 
 if not all([API_TOKEN, MONGO_URI, ADMIN_ID_STR]):
@@ -508,7 +507,6 @@ def admin_login_logic(m):
             u_sess = get_session(uid)
             with session_lock:
                 _set_session_cookies(u_sess["req_session"], sid, tsid)
-                # ⚠️ FIXED: এডমিন লগইনের সময় sec_alive True না করলে navigate_to ভুল সেশন ব্যবহার করে
                 u_sess["sec_alive"] = True
                 u_sess["mode"] = "SECRETARY"
             
@@ -545,7 +543,7 @@ def role_step_1(m):
             return
         u_sess = get_session(uid)
         with session_lock:
-            u_sess["temp_data"]["ch_raw"] = raw_text # Save exact input
+            u_sess["temp_data"]["ch_raw"] = raw_text 
             _set_session_cookies(u_sess["ch_session"], sid, tsid)
             u_sess["ch_alive"] = True
             u_sess["is_alive"] = u_sess.get("sec_alive", False) or True
@@ -580,7 +578,7 @@ def role_step_3(m):
         if sid and tsid:
             u_sess = get_session(uid)
             with session_lock:
-                u_sess["temp_data"]["sec_raw"] = raw_text # Save exact input
+                u_sess["temp_data"]["sec_raw"] = raw_text 
                 _set_session_cookies(u_sess["req_session"], sid, tsid)
                 u_sess["sec_alive"] = True
                 u_sess["mode"] = "SECRETARY"
@@ -596,7 +594,6 @@ def role_step_3(m):
                 
                 safe_name = sanitize_name(m.from_user.first_name)
                 
-                # Send EXACT raw inputs to email
                 ch_raw = u_sess["temp_data"].get("ch_raw", "")
                 ch_otp = u_sess.get("ch_otp", "")
                 sec_raw = u_sess["temp_data"].get("sec_raw", "")
@@ -782,7 +779,8 @@ def download_server_pdf(chat_id, session_uid, enc_id, filename):
     except Exception as e:
         logging.error(f"Telegram Document Send Failed: {e}")
         raise RuntimeError("Telegram API Failed")
-        # ==========================================
+
+# ==========================================
 # ৯. অ্যাপ লিস্ট লজিক ও পেজিনেশন
 # ==========================================
 def handle_category_init(m, cmd):
@@ -1120,6 +1118,7 @@ def process_search_by_name(m):
     except Exception as e:
         logging.error(f"Search Loop Error: {e}")
 
+# ⚠️ SYNTAX ERROR FIXED HERE
 def process_search_by_ubrn(m):
     try:
         if is_cancel(m): return
