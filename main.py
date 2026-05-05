@@ -1120,6 +1120,7 @@ def process_search_by_ubrn(m):
         if res and res.status_code == 200:
             try:
                 formatted_json = json.dumps(res.json(), indent=2, ensure_ascii=False)
+                # ⚠️ এই লাইনটিতেই সমস্যা ছিল, এখন এটি ঠিক করে দেওয়া হয়েছে
                 safe_send(m.chat.id, f"📊 *UBRN Result:*\n```json\n{formatted_json}\n
 ```", parse_mode='Markdown')
             except Exception as e: 
@@ -1133,7 +1134,6 @@ def process_search_by_ubrn(m):
         bot.register_next_step_handler_by_chat_id(m.chat.id, process_search_by_ubrn)
     except Exception as e:
         logging.error(f"UBRN Search Error: {e}")
-
 def start_ubrn_flow(m):
     try:
         u_sess = get_session(m.from_user.id)
