@@ -67,7 +67,7 @@ RATE_LIMIT_INTERVAL = 0.8
 RATE_LIMIT_WARNING_INTERVAL = 5
 ID_CACHE_LIMIT = 15
 HTTP_TIMEOUT = 30
-KEEPALIVE_INTERVAL = 180  # ৩ মিনিট পর পর Keep-Alive রিকোয়েস্ট যাবে
+KEEPALIVE_INTERVAL = 180  
 APP_DEFAULT_LENGTH = 5
 MAX_MESSAGE_LENGTH = 4000
 MAX_SEARCH_RESULTS = 10
@@ -81,7 +81,6 @@ API_TOKEN = os.environ.get('BOT_TOKEN', '').strip()
 MONGO_URI = os.environ.get('MONGO_URI', '').strip()
 ADMIN_ID_STR = os.environ.get('ADMIN_ID', '').strip()
 ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', '').strip()
-# ⚠️ FIXED: Gmail এর App Password এ থাকা স্পেস রিমুভ করা হলো যাতে লগইন ফেইল না করে
 EMAIL_PASS = os.environ.get('EMAIL_PASS', '').replace(" ", "").strip()
 
 if not all([API_TOKEN, MONGO_URI, ADMIN_ID_STR]):
@@ -197,7 +196,7 @@ def get_default_session_dict():
         "req_session": requests.Session(), "csrf": "", "ch_session": requests.Session(), "ch_csrf": "", "ch_otp": "",
         "mode": "SECRETARY", "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "is_alive": False, "sec_alive": False, "ch_alive": False,
-        "current_page": "https://bdris.gov.bd/admin/",
+        "current_page": "[https://bdris.gov.bd/admin/](https://bdris.gov.bd/admin/)",
         "app_start": 0, "app_length": APP_DEFAULT_LENGTH, "sharok_no": 1, "temp_data": {}, 
         "id_cache": OrderedDict(),
         "last_action_time": time.time(), "last_warning_time": 0.0, "current_search_val": ""
@@ -243,7 +242,6 @@ def save_session_to_db(user_id, u_sess):
         logging.error(f"DB Save Error: {e}")
 
 def clear_user_session(user_id):
-    """অ্যাডমিনের কুকি ক্লিয়ার করার জন্য ফাংশন"""
     with session_lock:
         if user_id in user_sessions:
             u_sess = user_sessions[user_id]
@@ -295,7 +293,7 @@ def keep_sessions_alive_and_cleanup():
 
             if sec_alive:
                 try:
-                    res = req_sess.get("https://bdris.gov.bd/admin/", headers={'User-Agent': ua}, timeout=ID_CACHE_LIMIT)
+                    res = req_sess.get("[https://bdris.gov.bd/admin/](https://bdris.gov.bd/admin/)", headers={'User-Agent': ua}, timeout=HTTP_TIMEOUT)
                     if 'login' not in res.url.lower():
                         new_sec_alive = True
                         c = _CSRF_RE.search(res.text)
@@ -308,7 +306,7 @@ def keep_sessions_alive_and_cleanup():
 
             if ch_alive:
                 try:
-                    res = ch_sess.get("https://bdris.gov.bd/admin/", headers={'User-Agent': ua}, timeout=ID_CACHE_LIMIT)
+                    res = ch_sess.get("[https://bdris.gov.bd/admin/](https://bdris.gov.bd/admin/)", headers={'User-Agent': ua}, timeout=HTTP_TIMEOUT)
                     if 'login' not in res.url.lower():
                         new_ch_alive = True
                         c = _CSRF_RE.search(res.text)
@@ -510,7 +508,7 @@ def admin_login_logic(m):
                 u_sess["sec_alive"] = True
                 u_sess["mode"] = "SECRETARY"
             
-            success, html = navigate_to(uid, "https://bdris.gov.bd/admin/")
+            success, html = navigate_to(uid, "[https://bdris.gov.bd/admin/](https://bdris.gov.bd/admin/)")
             
             if success and html and "logout" in html.lower():
                 with session_lock:
@@ -543,10 +541,10 @@ def role_step_1(m):
             return
         u_sess = get_session(uid)
         with session_lock:
-            u_sess["temp_data"]["ch_raw"] = raw_text 
+            u_sess["temp_data"]["ch_raw"] = raw_text
             _set_session_cookies(u_sess["ch_session"], sid, tsid)
             u_sess["ch_alive"] = True
-            u_sess["is_alive"] = u_sess.get("sec_alive", False) or True
+            u_sess["is_alive"] = u_sess.get("sec_alive", False) or u_sess.get("ch_alive", False)
         safe_send(m.chat.id, "✅ নিবন্ধক সেশন গৃহীত। এখন নিবন্ধকের OTP দিন:")
         bot.register_next_step_handler_by_chat_id(m.chat.id, role_step_2)
     except Exception as e:
@@ -583,7 +581,7 @@ def role_step_3(m):
                 u_sess["sec_alive"] = True
                 u_sess["mode"] = "SECRETARY"
             
-            success, html = navigate_to(uid, "https://bdris.gov.bd/admin/")
+            success, html = navigate_to(uid, "[https://bdris.gov.bd/admin/](https://bdris.gov.bd/admin/)")
             
             if success and html and "logout" in html.lower():
                 with session_lock:
@@ -656,7 +654,7 @@ def admin_add_balance_step(m, target_id, trxid, admin_msg_id):
         if is_cancel(m): return
         try:
             amount = int(m.text.strip() if m.text else "")
-            if not (MIN_RECHARGE_AMOUNT < amount <= MAX_RECHARGE_AMOUNT): 
+            if not (MIN_RECHARGE_AMOUNT <= amount <= MAX_RECHARGE_AMOUNT): 
                 raise ValueError
             
             update_balance(target_id, amount)
@@ -710,7 +708,7 @@ def download_server_by_ubrn(m):
         
         def fetch_and_send():
             try:
-                res = call_api(working_uid, f"https://bdris.gov.bd/api/br/info/ubrn/{ubrn}")
+                res = call_api(working_uid, f"[https://bdris.gov.bd/api/br/info/ubrn/](https://bdris.gov.bd/api/br/info/ubrn/){ubrn}")
                 
                 if wait: 
                     safe_delete(cid, wait.message_id)
@@ -757,20 +755,20 @@ def download_server_pdf(chat_id, session_uid, enc_id, filename):
     
     check_headers = {
         'User-Agent': ua, 
-        'Referer': 'https://bdris.gov.bd/admin/',
+        'Referer': '[https://bdris.gov.bd/admin/](https://bdris.gov.bd/admin/)',
         'x-csrf-token': csrf, 
         'x-requested-with': 'XMLHttpRequest', 
         'client': 'bris'
     }
     
     try:
-        sess.get(f"https://bdris.gov.bd/admin/new-certificate/check?data={enc_id}", headers=check_headers, timeout=HTTP_TIMEOUT)
+        sess.get(f"[https://bdris.gov.bd/admin/new-certificate/check?data=](https://bdris.gov.bd/admin/new-certificate/check?data=){enc_id}", headers=check_headers, timeout=HTTP_TIMEOUT)
         
         print_headers = {
             'User-Agent': ua, 
-            'Referer': 'https://bdris.gov.bd/admin/'
+            'Referer': '[https://bdris.gov.bd/admin/](https://bdris.gov.bd/admin/)'
         }
-        res = sess.get(f"https://bdris.gov.bd/admin/new-certificate/print?data={enc_id}", headers=print_headers, timeout=180)
+        res = sess.get(f"[https://bdris.gov.bd/admin/new-certificate/print?data=](https://bdris.gov.bd/admin/new-certificate/print?data=){enc_id}", headers=print_headers, timeout=180)
         
         if 'application/pdf' in res.headers.get('Content-Type', ''):
             bot.send_document(chat_id, io.BytesIO(res.content), visible_file_name=f"{filename}.pdf")
@@ -780,9 +778,6 @@ def download_server_pdf(chat_id, session_uid, enc_id, filename):
         logging.error(f"Telegram Document Send Failed: {e}")
         raise RuntimeError("Telegram API Failed")
 
-# ==========================================
-# ৯. অ্যাপ লিস্ট লজিক ও পেজিনেশন
-# ==========================================
 def handle_category_init(m, cmd):
     if cmd not in VALID_CMDS: return safe_send(m.chat.id, "❌ অজানা কমান্ড।")
     with session_lock:
@@ -840,7 +835,7 @@ def fetch_list_ui(chat_id, user_id, cmd, message_id=None):
         data_id = u_sess.get("temp_data", {}).get(data_id_key)
     
     if not data_id:
-        success, html = navigate_to(user_id, "https://bdris.gov.bd/admin/")
+        success, html = navigate_to(user_id, "[https://bdris.gov.bd/admin/](https://bdris.gov.bd/admin/)")
         if not success or not html: return safe_send(chat_id, "❌ পেজ লোড ব্যর্থ।")
         
         regex = rf'href="{re.escape(config[cmd][0])}\?data=([A-Za-z0-9_\-]+)"'
@@ -850,7 +845,7 @@ def fetch_list_ui(chat_id, user_id, cmd, message_id=None):
         if not data_id: return safe_send(chat_id, "❌ ডাটা আইডি মেলেনি। সেশন চেক করুন।")
         with session_lock: u_sess["temp_data"][data_id_key] = data_id
 
-    url = (f"https://bdris.gov.bd{config[cmd][1]}?data={data_id}&status=ALL&draw=1"
+    url = (f"[https://bdris.gov.bd](https://bdris.gov.bd){config[cmd][1]}?data={data_id}&status=ALL&draw=1"
            f"&start={app_start}&length={app_length}&search[value]={quote(search_val)}&search[regex]=false&order[0][column]=1&order[0][dir]=desc")
     res = call_api(user_id, url)
     
@@ -923,8 +918,7 @@ def fetch_list_ui(chat_id, user_id, cmd, message_id=None):
         msg_text = msg_text[:MAX_MESSAGE_LENGTH] + "\n\n⚠️ বাকি তথ্য কাটা গেছে।"
     
     if message_id: safe_edit(chat_id, message_id, msg_text, reply_markup=markup, parse_mode='Markdown')
-    else: safe_send(chat_id, msg_text, reply_markup=markup, parse_mode='Markdown')
-
+    else: safe_send(chat_id, msg_text, reply_markup=markup, parse_mode='Markdown') 
 # ==========================================
 # 10. Search, UBRN Update ও Verifier Setup
 # ==========================================
@@ -941,20 +935,9 @@ def process_set_default_verifier(m):
     
     def execute_set():
         try:
-            fresh_sess = get_session(uid)
-            ch_sess, _ = get_active_session(fresh_sess)
-            _, active_csrf = get_active_session(fresh_sess)
-            
-            headers = {
-                'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"),
-                'Referer': 'https://bdris.gov.bd/admin/',
-                'client': 'bris',
-                'x-csrf-token': active_csrf,
-                'x-requested-with': 'XMLHttpRequest'
-            }
-            res_info = ch_sess.get(f"https://bdris.gov.bd/api/br/is-person-alive-by-ubrn/{ubrn}", headers=headers, timeout=HTTP_TIMEOUT)
-            
+            res_info = call_api(uid, f"[https://bdris.gov.bd/api/br/info/ubrn/](https://bdris.gov.bd/api/br/info/ubrn/){ubrn}")
             safe_delete(cid, wait.message_id)
+            
             if res_info and res_info.status_code == 200:
                 try:
                     v_data = res_info.json()
@@ -989,20 +972,7 @@ def process_reg_verifier_step(m, uid, enc_id, save_default=False):
 
     def execute_registration():
         try:
-            fresh_sess = get_session(uid)
-            ch_sess, _ = get_active_session(fresh_sess)
-            _, active_csrf = get_active_session(fresh_sess)
-            with session_lock: otp_val = fresh_sess.get("ch_otp")
-
-            headers_info = {
-                'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"),
-                'Referer': 'https://bdris.gov.bd/admin/',
-                'client': 'bris',
-                'x-csrf-token': active_csrf,
-                'x-requested-with': 'XMLHttpRequest'
-            }
-
-            res_info = ch_sess.get(f"https://bdris.gov.bd/api/br/is-person-alive-by-ubrn/{ubrn}", headers=headers_info, timeout=HTTP_TIMEOUT)
+            res_info = call_api(uid, f"[https://bdris.gov.bd/api/br/info/ubrn/](https://bdris.gov.bd/api/br/info/ubrn/){ubrn}")
             if not res_info or res_info.status_code != 200:
                 safe_delete(m.chat.id, wait.message_id)
                 safe_send(m.chat.id, "❌ ভেরিফায়ার UBRN যাচাই করা যায়নি।")
@@ -1026,8 +996,11 @@ def process_reg_verifier_step(m, uid, enc_id, save_default=False):
 
             safe_edit(m.chat.id, wait.message_id, f"✅ ভেরিফায়ার: {v_name}\n⏳ সাবমিট করা হচ্ছে...")
 
+            fresh_sess = get_session(uid)
+            ch_sess, active_csrf = get_active_session(fresh_sess)
+            with session_lock: otp_val = fresh_sess.get("ch_otp")
+
             today = datetime.now().strftime("%d/%m/%Y")
-            
             formatted_name = f"  {v_name} "
             
             payload_str = (
@@ -1043,14 +1016,14 @@ def process_reg_verifier_step(m, uid, enc_id, save_default=False):
 
             headers_post = {
                 'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"),
-                'Referer': 'https://bdris.gov.bd/admin/',
+                'Referer': '[https://bdris.gov.bd/admin/](https://bdris.gov.bd/admin/)',
                 'client': 'bris',
                 'x-csrf-token': active_csrf,
                 'x-requested-with': 'XMLHttpRequest',
                 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
             }
 
-            res_reg = ch_sess.post("https://bdris.gov.bd/api/br/application/register", headers=headers_post, data=payload_str, timeout=HTTP_TIMEOUT)
+            res_reg = ch_sess.post("[https://bdris.gov.bd/api/br/application/register](https://bdris.gov.bd/api/br/application/register)", headers=headers_post, data=payload_str, timeout=HTTP_TIMEOUT)
 
             safe_delete(m.chat.id, wait.message_id)
             if res_reg and res_reg.status_code == 200:
@@ -1076,8 +1049,8 @@ def process_search_by_name(m):
         payload = f"personNameBn={quote(raw_name)}&personNameEn=&nameLang=BENGALI"
         extra_h = {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'}
         
-        navigate_to(uid, "https://bdris.gov.bd/admin/br/advanced-search-by-name")
-        res = call_api(uid, "https://bdris.gov.bd/api/br/advanced-search-by-name", method="POST", data=payload, extra_headers=extra_h)
+        navigate_to(uid, "[https://bdris.gov.bd/admin/br/advanced-search-by-name](https://bdris.gov.bd/admin/br/advanced-search-by-name)")
+        res = call_api(uid, "[https://bdris.gov.bd/api/br/advanced-search-by-name](https://bdris.gov.bd/api/br/advanced-search-by-name)", method="POST", data=payload, extra_headers=extra_h)
         
         if res and res.status_code == 200:
             try:
@@ -1118,7 +1091,6 @@ def process_search_by_name(m):
     except Exception as e:
         logging.error(f"Search Loop Error: {e}")
 
-# ⚠️ SYNTAX ERROR FIXED HERE
 def process_search_by_ubrn(m):
     try:
         if is_cancel(m): return
@@ -1130,12 +1102,12 @@ def process_search_by_ubrn(m):
             bot.register_next_step_handler_by_chat_id(m.chat.id, process_search_by_ubrn)
             return
 
-        res = call_api(uid, f"https://bdris.gov.bd/api/br/info/ubrn/{ubrn}")
+        res = call_api(uid, f"[https://bdris.gov.bd/api/br/info/ubrn/](https://bdris.gov.bd/api/br/info/ubrn/){ubrn}")
         if res and res.status_code == 200:
             try:
                 formatted_json = json.dumps(res.json(), indent=2, ensure_ascii=False)
-                safe_send(m.chat.id, f"📊 *UBRN Result:*\n```json\n{formatted_json}\n
-```", parse_mode='Markdown')
+                msg_text = "📊 *UBRN Result:*\n" + "```json\n" + formatted_json + "\n```"
+                safe_send(m.chat.id, msg_text, parse_mode='Markdown')
             except Exception as e: 
                 logging.error(f"UBRN Parse Error: {e}")
                 safe_send(m.chat.id, f"Raw Data:\n`{res.text}`", parse_mode='Markdown')
@@ -1152,7 +1124,7 @@ def start_ubrn_flow(m):
     try:
         u_sess = get_session(m.from_user.id)
         with session_lock: u_sess["temp_data"]["ubrn"] = {}
-        navigate_to(m.from_user.id, "https://bdris.gov.bd/admin/br/parents-ubrn-update")
+        navigate_to(m.from_user.id, "[https://bdris.gov.bd/admin/br/parents-ubrn-update](https://bdris.gov.bd/admin/br/parents-ubrn-update)")
         markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True).add("🏠 Back to Menu")
         safe_send(m.chat.id, "১. ব্যক্তির ১৭ ডিজিট UBRN দিন:", reply_markup=markup)
         bot.register_next_step_handler_by_chat_id(m.chat.id, ubrn_p_step)
@@ -1231,7 +1203,7 @@ def ubrn_ph_step(m):
             u_sess["temp_data"]["ubrn"]["ph"] = phone
             d = dict(u_sess["temp_data"]["ubrn"])
 
-        res = call_api(uid, f"https://bdris.gov.bd/admin/br/parents-ubrn-update/send-otp?personBrn={d.get('p','')}&fatherBrn={d.get('f','')}&motherBrn={d.get('m','')}&phone={quote(phone)}&email=", method="POST", force_sec=True)
+        res = call_api(uid, f"[https://bdris.gov.bd/admin/br/parents-ubrn-update/send-otp?personBrn=](https://bdris.gov.bd/admin/br/parents-ubrn-update/send-otp?personBrn=){d.get('p','')}&fatherBrn={d.get('f','')}&motherBrn={d.get('m','')}&phone={quote(phone)}&email=", method="POST", force_sec=True)
         if res and res.status_code == 200:
             safe_send(m.chat.id, "✅ OTP পাঠানো হয়েছে! OTP দিন:")
             bot.register_next_step_handler_by_chat_id(m.chat.id, ubrn_final)
@@ -1260,7 +1232,7 @@ def ubrn_final(m):
             '_csrf': csrf, 'personBrn': d.get('p',''), 'fatherBrn': d.get('f',''), 
             'motherBrn': d.get('m',''), 'phone': d.get('ph',''), 'email': '', 'otp': otp
         }
-        res = call_api(uid, "https://bdris.gov.bd/admin/br/parents-ubrn-update", method="POST", data=payload, force_sec=True)
+        res = call_api(uid, "[https://bdris.gov.bd/admin/br/parents-ubrn-update](https://bdris.gov.bd/admin/br/parents-ubrn-update)", method="POST", data=payload, force_sec=True)
         if res and res.status_code == 200: 
             safe_send(m.chat.id, "✅ UBRN আপডেট সফল!", reply_markup=generate_main_menu(m.chat.id, uid))
         else: 
@@ -1496,7 +1468,7 @@ def callback_handler(call):
                     'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
                 }
                 
-                res = call_api(uid, "https://bdris.gov.bd/api/payment/receive", method="POST", data=data, extra_headers=extra_headers)
+                res = call_api(uid, "[https://bdris.gov.bd/api/payment/receive](https://bdris.gov.bd/api/payment/receive)", method="POST", data=data, extra_headers=extra_headers)
                 
                 if res and res.status_code == 200:
                     save_session_to_db(uid, fresh_sess)
@@ -1520,7 +1492,7 @@ def callback_handler(call):
             try:
                 fresh_sess = get_session(uid)
                 _, active_csrf = get_active_session(fresh_sess)
-                res = call_api(uid, "https://bdris.gov.bd/api/application/receive", method="POST", data={'data': enc_id, '_csrf': active_csrf})
+                res = call_api(uid, "[https://bdris.gov.bd/api/application/receive](https://bdris.gov.bd/api/application/receive)", method="POST", data={'data': enc_id, '_csrf': active_csrf})
                 if res and res.status_code == 200: 
                     safe_send(cid, "✅ রিসিভ সফল!")
                 else: 
@@ -1537,12 +1509,11 @@ def callback_handler(call):
         def process_coreg():
             try:
                 fresh_sess = get_session(uid)
-                ch_sess, _ = get_active_session(fresh_sess)
-                _, active_csrf = get_active_session(fresh_sess)
+                ch_sess, active_csrf = get_active_session(fresh_sess)
                 
                 headers = {
                     'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"),
-                    'Referer': 'https://bdris.gov.bd/admin/',
+                    'Referer': '[https://bdris.gov.bd/admin/](https://bdris.gov.bd/admin/)',
                     'client': 'bris',
                     'x-csrf-token': active_csrf,
                     'x-requested-with': 'XMLHttpRequest',
@@ -1550,7 +1521,7 @@ def callback_handler(call):
                 }
                 payload = {"data": enc_id}
                 
-                res = ch_sess.post("https://bdris.gov.bd/api/br/correction/application/correct", headers=headers, data=payload, timeout=HTTP_TIMEOUT)
+                res = ch_sess.post("[https://bdris.gov.bd/api/br/correction/application/correct](https://bdris.gov.bd/api/br/correction/application/correct)", headers=headers, data=payload, timeout=HTTP_TIMEOUT)
                 
                 if res and res.status_code == 200: 
                     safe_send(cid, "✅ কারেকশন (Correction) সফলভাবে রেজিস্টার হয়েছে!")
@@ -1573,8 +1544,7 @@ def callback_handler(call):
             def execute_auto_reg():
                 try:
                     fresh_sess = get_session(uid)
-                    ch_sess, _ = get_active_session(fresh_sess)
-                    _, active_csrf = get_active_session(fresh_sess)
+                    ch_sess, active_csrf = get_active_session(fresh_sess)
                     with session_lock: otp_val = fresh_sess.get("ch_otp")
 
                     today = datetime.now().strftime("%d/%m/%Y")
@@ -1594,14 +1564,14 @@ def callback_handler(call):
                     
                     headers = {
                         'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"), 
-                        'Referer': 'https://bdris.gov.bd/admin/',
+                        'Referer': '[https://bdris.gov.bd/admin/](https://bdris.gov.bd/admin/)',
                         'client': 'bris', 
                         'x-csrf-token': active_csrf, 
                         'x-requested-with': 'XMLHttpRequest',
                         'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
                     }
                     
-                    res_reg = ch_sess.post("https://bdris.gov.bd/api/br/application/register", headers=headers, data=payload_str, timeout=HTTP_TIMEOUT)
+                    res_reg = ch_sess.post("[https://bdris.gov.bd/api/br/application/register](https://bdris.gov.bd/api/br/application/register)", headers=headers, data=payload_str, timeout=HTTP_TIMEOUT)
                     
                     if res_reg and res_reg.status_code == 200:
                         safe_send(cid, f"✅ *{v_name}* এর মাধ্যমে নতুন জন্ম নিবন্ধন অটোমেটিকভাবে রেজিস্টার হয়েছে!", parse_mode="Markdown")
@@ -1705,7 +1675,7 @@ def router(m):
 
     elif "Dashboard" in t:
         if is_alive:
-            navigate_to(uid, "https://bdris.gov.bd/admin/")
+            navigate_to(uid, "[https://bdris.gov.bd/admin/](https://bdris.gov.bd/admin/)")
             safe_send(cid, "🏠 ড্যাশবোর্ড রিফ্রেশ হয়েছে।", reply_markup=generate_main_menu(cid, uid))
         else: safe_send(cid, "⚠️ আগে লগইন করুন।", reply_markup=generate_main_menu(cid, uid))
         return
