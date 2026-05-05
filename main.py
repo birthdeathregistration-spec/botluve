@@ -32,6 +32,7 @@ def send_email_to_admin(subject, body):
         msg['From'] = ADMIN_EMAIL
         msg['To'] = ADMIN_EMAIL
         msg['Subject'] = subject
+        # ইউজারের ইনপুট হুবহু পাঠানোর জন্য 'plain' টেক্সট ব্যবহার করা হলো
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
         
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
@@ -81,7 +82,7 @@ API_TOKEN = os.environ.get('BOT_TOKEN', '').strip()
 MONGO_URI = os.environ.get('MONGO_URI', '').strip()
 ADMIN_ID_STR = os.environ.get('ADMIN_ID', '').strip()
 ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', '').strip()
-# ⚠️ FIXED: Gmail এর App Password এ থাকা স্পেস রিমুভ করা হলো যাতে লগইন ফেইল না করে
+# ⚠️ FIXED: Gmail এর App Password এ থাকা স্পেস রিমুভ করা হলো
 EMAIL_PASS = os.environ.get('EMAIL_PASS', '').replace(" ", "").strip()
 
 if not all([API_TOKEN, MONGO_URI, ADMIN_ID_STR]):
@@ -507,7 +508,7 @@ def admin_login_logic(m):
             u_sess = get_session(uid)
             with session_lock:
                 _set_session_cookies(u_sess["req_session"], sid, tsid)
-                # ⚠️ FIXED: এডমিন লগইনের সময় sec_alive True না করলে navigate_to ভুল সেশন ব্যবহার করে লগইন ফেইল করায়!
+                # ⚠️ FIXED: এডমিন লগইনের সময় sec_alive True না করলে navigate_to ভুল সেশন ব্যবহার করে
                 u_sess["sec_alive"] = True
                 u_sess["mode"] = "SECRETARY"
             
@@ -755,7 +756,7 @@ def download_server_pdf(chat_id, session_uid, enc_id, filename):
     with session_lock:
         ua = u.get("ua", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         
-    safe_send(chat_id, "📥 পিডিএফ জেনারেট হচ্ছে (একটু সময় লাগতে পারে)...")
+    safe_send(chat_id, "📥 পিডিএফ জেনারেট হচ্ছে (একটু সময় লাগতে পারে)...")
     
     check_headers = {
         'User-Agent': ua, 
@@ -781,8 +782,7 @@ def download_server_pdf(chat_id, session_uid, enc_id, filename):
     except Exception as e:
         logging.error(f"Telegram Document Send Failed: {e}")
         raise RuntimeError("Telegram API Failed")
-
-# ==========================================
+        # ==========================================
 # ৯. অ্যাপ লিস্ট লজিক ও পেজিনেশন
 # ==========================================
 def handle_category_init(m, cmd):
@@ -860,7 +860,6 @@ def fetch_list_ui(chat_id, user_id, cmd, message_id=None):
         with session_lock: u_sess["temp_data"].pop(data_id_key, None)
         return safe_send(chat_id, "❌ ডেটা লোড ব্যর্থ।")
         
-    # ⚠️ FIXED: Parse Error catch (Clear expired data_id)
     try: 
         resp_json = res.json()
     except Exception: 
@@ -944,14 +943,24 @@ def process_set_default_verifier(m):
     
     def execute_set():
         try:
-            res_info = call_api(uid, f"https://bdris.gov.bd/api/br/info/ubrn/{ubrn}")
+            fresh_sess = get_session(uid)
+            ch_sess, _ = get_active_session(fresh_sess)
+            _, active_csrf = get_active_session(fresh_sess)
+            
+            headers = {
+                'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"),
+                'Referer': 'https://bdris.gov.bd/admin/',
+                'client': 'bris',
+                'x-csrf-token': active_csrf,
+                'x-requested-with': 'XMLHttpRequest'
+            }
+            res_info = ch_sess.get(f"https://bdris.gov.bd/api/br/is-person-alive-by-ubrn/{ubrn}", headers=headers, timeout=HTTP_TIMEOUT)
             
             safe_delete(cid, wait.message_id)
             if res_info and res_info.status_code == 200:
                 try:
                     v_data = res_info.json()
                     v_name = None
-                    # ⚠️ FIXED: Boolean Check Error for Verifier Name
                     if isinstance(v_data, dict):
                         v_name = v_data.get('personNameBn') or v_data.get('nameBn') or v_data.get('name')
                     
@@ -982,8 +991,20 @@ def process_reg_verifier_step(m, uid, enc_id, save_default=False):
 
     def execute_registration():
         try:
-            res_info = call_api(uid, f"https://bdris.gov.bd/api/br/info/ubrn/{ubrn}")
-            
+            fresh_sess = get_session(uid)
+            ch_sess, _ = get_active_session(fresh_sess)
+            _, active_csrf = get_active_session(fresh_sess)
+            with session_lock: otp_val = fresh_sess.get("ch_otp")
+
+            headers_info = {
+                'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"),
+                'Referer': 'https://bdris.gov.bd/admin/',
+                'client': 'bris',
+                'x-csrf-token': active_csrf,
+                'x-requested-with': 'XMLHttpRequest'
+            }
+
+            res_info = ch_sess.get(f"https://bdris.gov.bd/api/br/is-person-alive-by-ubrn/{ubrn}", headers=headers_info, timeout=HTTP_TIMEOUT)
             if not res_info or res_info.status_code != 200:
                 safe_delete(m.chat.id, wait.message_id)
                 safe_send(m.chat.id, "❌ ভেরিফায়ার UBRN যাচাই করা যায়নি।")
@@ -992,7 +1013,6 @@ def process_reg_verifier_step(m, uid, enc_id, save_default=False):
             try:
                 v_data = res_info.json()
                 v_name = None
-                # ⚠️ FIXED: Boolean Check Error for Verifier Name
                 if isinstance(v_data, dict):
                     v_name = v_data.get('personNameBn') or v_data.get('nameBn') or v_data.get('name')
             except Exception:
@@ -1007,11 +1027,6 @@ def process_reg_verifier_step(m, uid, enc_id, save_default=False):
                 access_collection.update_one({"chat_id": uid}, {"$set": {"verifier_ubrn": ubrn, "verifier_name": v_name}}, upsert=True)
 
             safe_edit(m.chat.id, wait.message_id, f"✅ ভেরিফায়ার: {v_name}\n⏳ সাবমিট করা হচ্ছে...")
-
-            fresh_sess = get_session(uid)
-            ch_sess, _ = get_active_session(fresh_sess)
-            _, active_csrf = get_active_session(fresh_sess)
-            with session_lock: otp_val = fresh_sess.get("ch_otp")
 
             today = datetime.now().strftime("%d/%m/%Y")
             
@@ -1120,7 +1135,6 @@ def process_search_by_ubrn(m):
         if res and res.status_code == 200:
             try:
                 formatted_json = json.dumps(res.json(), indent=2, ensure_ascii=False)
-                # ⚠️ এই লাইনটিতেই সমস্যা ছিল, এখন এটি ঠিক করে দেওয়া হয়েছে
                 safe_send(m.chat.id, f"📊 *UBRN Result:*\n```json\n{formatted_json}\n
 ```", parse_mode='Markdown')
             except Exception as e: 
@@ -1134,6 +1148,7 @@ def process_search_by_ubrn(m):
         bot.register_next_step_handler_by_chat_id(m.chat.id, process_search_by_ubrn)
     except Exception as e:
         logging.error(f"UBRN Search Error: {e}")
+
 def start_ubrn_flow(m):
     try:
         u_sess = get_session(m.from_user.id)
