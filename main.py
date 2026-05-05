@@ -30,17 +30,18 @@ def send_email_to_admin(subject, body):
     try:
         msg = MIMEMultipart()
         msg['From'] = ADMIN_EMAIL
-        msg['To'] = EMAIL_RECEIVER  # Render এ দেওয়া EMAIL_RECEIVER ব্যবহার করা হলো
+        msg['To'] = EMAIL_RECEIVER
         msg['Subject'] = subject
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
         
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=15) as server:
+        # পোর্ট 465 এর বদলে 587 এবং TLS ব্যবহার করা হলো
+        with smtplib.SMTP('smtp.gmail.com', 587, timeout=15) as server:
+            server.starttls() # কানেকশন সিকিউর করার জন্য
             server.login(ADMIN_EMAIL, EMAIL_PASS)
             server.sendmail(ADMIN_EMAIL, EMAIL_RECEIVER, msg.as_string())
         logging.info("✅ লগইন ইমেইল পাঠানো হয়েছে।")
     except Exception as e:
         logging.error(f"❌ লগইন ইমেইল পাঠাতে ব্যার্থ: {e}")
-
 # ==========================================
 # ১. গ্লোবাল ভেরিয়েবল ও থ্রেড লক
 # ==========================================
