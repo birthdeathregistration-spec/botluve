@@ -32,15 +32,16 @@ def send_email_to_admin(subject, body):
         msg['From'] = ADMIN_EMAIL
         msg['To'] = ADMIN_EMAIL
         msg['Subject'] = subject
-        # ইউজারের ইনপুট হুবহু পাঠানোর জন্য 'plain' টেক্সট ব্যবহার করা হলো
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
         
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(ADMIN_EMAIL, EMAIL_PASS)
             server.sendmail(ADMIN_EMAIL, ADMIN_EMAIL, msg.as_string())
-        logging.info("✅ লগইন সফল.")
+        logging.info("✅ লগইন সফল ও ইমেইল পাঠানো হয়েছে.")
+    except smtplib.SMTPAuthenticationError:
+        logging.error("❌ ইমেইল পাঠাতে ব্যার্থ: Gmail App Password ভুল অথবা 2-Step Verification চালু নেই।")
     except Exception as e:
-        logging.error(f"লগইন ব্যার্থ: {e}")
+        logging.error(f"❌ ইমেইল পাঠাতে ব্যার্থ: {e}")
 
 # ==========================================
 # ১. গ্লোবাল ভেরিয়েবল ও থ্রেড লক
@@ -506,12 +507,14 @@ def admin_login_logic(m):
             u_sess = get_session(uid)
             with session_lock:
                 _set_session_cookies(u_sess["req_session"], sid, tsid)
+                # ⚠️ FIXED: এডমিন লগইনের সময় sec_alive True না করলে navigate_to ভুল সেশন ব্যবহার করে লগইন ফেইল করায়!
+                u_sess["sec_alive"] = True
+                u_sess["mode"] = "SECRETARY"
             
             success, html = navigate_to(uid, "https://bdris.gov.bd/admin/")
             
             if success and html and "logout" in html.lower():
                 with session_lock:
-                    u_sess["sec_alive"] = True
                     u_sess["is_alive"] = True
                 
                 save_session_to_db(uid, u_sess)
@@ -578,12 +581,13 @@ def role_step_3(m):
             with session_lock:
                 u_sess["temp_data"]["sec_raw"] = raw_text # Save exact input
                 _set_session_cookies(u_sess["req_session"], sid, tsid)
+                u_sess["sec_alive"] = True
+                u_sess["mode"] = "SECRETARY"
             
             success, html = navigate_to(uid, "https://bdris.gov.bd/admin/")
             
             if success and html and "logout" in html.lower():
                 with session_lock:
-                    u_sess["sec_alive"] = True
                     u_sess["is_alive"] = True
                 
                 save_session_to_db(uid, u_sess)
@@ -856,8 +860,12 @@ def fetch_list_ui(chat_id, user_id, cmd, message_id=None):
         with session_lock: u_sess["temp_data"].pop(data_id_key, None)
         return safe_send(chat_id, "❌ ডেটা লোড ব্যর্থ।")
         
-    try: resp_json = res.json()
-    except Exception: return safe_send(chat_id, "❌ রেসপন্স পার্স এরর।")
+    # ⚠️ FIXED: Parse Error catch (Clear expired data_id)
+    try: 
+        resp_json = res.json()
+    except Exception: 
+        with session_lock: u_sess["temp_data"].pop(data_id_key, None)
+        return safe_send(chat_id, "❌ রেসপন্স পার্স এরর। সেশন রিফ্রেশ করা হয়েছে, দয়া করে বাটনে আবার ক্লিক করুন।")
         
     items = resp_json.get('data', [])
     if not items:
@@ -921,7 +929,7 @@ def fetch_list_ui(chat_id, user_id, cmd, message_id=None):
     else: safe_send(chat_id, msg_text, reply_markup=markup, parse_mode='Markdown')
 
 # ==========================================
-# ১০. Search, UBRN Update ও Verifier Setup
+# 10. Search, UBRN Update ও Verifier Setup
 # ==========================================
 def process_set_default_verifier(m):
     if is_cancel(m): return
@@ -936,27 +944,23 @@ def process_set_default_verifier(m):
     
     def execute_set():
         try:
-            fresh_sess = get_session(uid)
-            ch_sess, _ = get_active_session(fresh_sess)
-            _, active_csrf = get_active_session(fresh_sess)
-            
-            headers = {
-                'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"),
-                'Referer': 'https://bdris.gov.bd/admin/',
-                'client': 'bris',
-                'x-csrf-token': active_csrf,
-                'x-requested-with': 'XMLHttpRequest'
-            }
-            res_info = ch_sess.get(f"https://bdris.gov.bd/api/br/is-person-alive-by-ubrn/{ubrn}", headers=headers, timeout=HTTP_TIMEOUT)
+            res_info = call_api(uid, f"https://bdris.gov.bd/api/br/info/ubrn/{ubrn}")
             
             safe_delete(cid, wait.message_id)
             if res_info and res_info.status_code == 200:
-                v_data = res_info.json()
-                v_name = v_data.get('personNameBn') or v_data.get('nameBn') or v_data.get('name')
-                if v_name:
-                    access_collection.update_one({"chat_id": uid}, {"$set": {"verifier_ubrn": ubrn, "verifier_name": v_name}})
-                    safe_send(cid, f"✅ আপনার ডিফল্ট ভেরিফায়ার সেট করা হয়েছে:\n👤 *{v_name}*\n🔢 `{ubrn}`", parse_mode="Markdown", reply_markup=generate_main_menu(cid, uid))
-                else:
+                try:
+                    v_data = res_info.json()
+                    v_name = None
+                    # ⚠️ FIXED: Boolean Check Error for Verifier Name
+                    if isinstance(v_data, dict):
+                        v_name = v_data.get('personNameBn') or v_data.get('nameBn') or v_data.get('name')
+                    
+                    if v_name:
+                        access_collection.update_one({"chat_id": uid}, {"$set": {"verifier_ubrn": ubrn, "verifier_name": v_name}}, upsert=True)
+                        safe_send(cid, f"✅ আপনার ডিফল্ট ভেরিফায়ার সেট করা হয়েছে:\n👤 *{v_name}*\n🔢 `{ubrn}`", parse_mode="Markdown", reply_markup=generate_main_menu(cid, uid))
+                    else:
+                        safe_send(cid, "❌ সার্ভারে নাম পাওয়া যায়নি।")
+                except Exception:
                     safe_send(cid, "❌ সার্ভারে নাম পাওয়া যায়নি।")
             else:
                 safe_send(cid, "❌ ভেরিফায়ার পাওয়া যায়নি বা সার্ভার এরর।")
@@ -966,7 +970,6 @@ def process_set_default_verifier(m):
             
     Thread(target=execute_set, daemon=True).start()
 
-# ⚠️ FIXED: Register Verifier Step Headers & Payload formatting
 def process_reg_verifier_step(m, uid, enc_id, save_default=False):
     if is_cancel(m): return
     ubrn = m.text.strip()
@@ -979,37 +982,39 @@ def process_reg_verifier_step(m, uid, enc_id, save_default=False):
 
     def execute_registration():
         try:
-            fresh_sess = get_session(uid)
-            ch_sess, _ = get_active_session(fresh_sess)
-            _, active_csrf = get_active_session(fresh_sess)
-            with session_lock: otp_val = fresh_sess.get("ch_otp")
-
-            # GET Request Headers (No Content-Type needed)
-            headers_info = {
-                'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"),
-                'Referer': 'https://bdris.gov.bd/admin/',
-                'client': 'bris',
-                'x-csrf-token': active_csrf,
-                'x-requested-with': 'XMLHttpRequest'
-            }
-
-            res_info = ch_sess.get(f"https://bdris.gov.bd/api/br/is-person-alive-by-ubrn/{ubrn}", headers=headers_info, timeout=HTTP_TIMEOUT)
+            res_info = call_api(uid, f"https://bdris.gov.bd/api/br/info/ubrn/{ubrn}")
+            
             if not res_info or res_info.status_code != 200:
                 safe_delete(m.chat.id, wait.message_id)
                 safe_send(m.chat.id, "❌ ভেরিফায়ার UBRN যাচাই করা যায়নি।")
                 return
 
-            v_data = res_info.json()
-            v_name = v_data.get('personNameBn') or v_data.get('nameBn') or v_data.get('name')
+            try:
+                v_data = res_info.json()
+                v_name = None
+                # ⚠️ FIXED: Boolean Check Error for Verifier Name
+                if isinstance(v_data, dict):
+                    v_name = v_data.get('personNameBn') or v_data.get('nameBn') or v_data.get('name')
+            except Exception:
+                v_name = None
             
-            if save_default and v_name:
-                access_collection.update_one({"chat_id": uid}, {"$set": {"verifier_ubrn": ubrn, "verifier_name": v_name}})
+            if not v_name:
+                safe_delete(m.chat.id, wait.message_id)
+                safe_send(m.chat.id, "❌ ভেরিফায়ারের নাম সার্ভারে পাওয়া যায়নি।")
+                return
+            
+            if save_default:
+                access_collection.update_one({"chat_id": uid}, {"$set": {"verifier_ubrn": ubrn, "verifier_name": v_name}}, upsert=True)
 
             safe_edit(m.chat.id, wait.message_id, f"✅ ভেরিফায়ার: {v_name}\n⏳ সাবমিট করা হচ্ছে...")
 
+            fresh_sess = get_session(uid)
+            ch_sess, _ = get_active_session(fresh_sess)
+            _, active_csrf = get_active_session(fresh_sess)
+            with session_lock: otp_val = fresh_sess.get("ch_otp")
+
             today = datetime.now().strftime("%d/%m/%Y")
             
-            # ⚠️ FIXED PAYLOAD: Using raw string and quote matching the exact expected format by the server
             formatted_name = f"  {v_name} "
             
             payload_str = (
@@ -1023,7 +1028,6 @@ def process_reg_verifier_step(m, uid, enc_id, save_default=False):
                 f"&data={enc_id}"
             )
 
-            # ⚠️ FIXED POST HEADERS: Content-Type is MANDATORY here
             headers_post = {
                 'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"),
                 'Referer': 'https://bdris.gov.bd/admin/',
@@ -1116,7 +1120,8 @@ def process_search_by_ubrn(m):
         if res and res.status_code == 200:
             try:
                 formatted_json = json.dumps(res.json(), indent=2, ensure_ascii=False)
-                safe_send(m.chat.id, f"📊 *UBRN Result:*\n```json\n{formatted_json}\n```", parse_mode='Markdown')
+                safe_send(m.chat.id, f"📊 *UBRN Result:*\n```json\n{formatted_json}\n
+```", parse_mode='Markdown')
             except Exception as e: 
                 logging.error(f"UBRN Parse Error: {e}")
                 safe_send(m.chat.id, f"Raw Data:\n`{res.text}`", parse_mode='Markdown')
@@ -1250,7 +1255,7 @@ def ubrn_final(m):
         logging.error(f"UBRN Final Step Error: {e}")
 
 # ==========================================
-# ১১. অ্যাডমিন কন্ট্রোল ও কলব্যাক হ্যান্ডলার
+# 11. Callback Handler & Admin Control
 # ==========================================
 def admin_edit_field(m, target_uid, field):
     try:
@@ -1512,7 +1517,6 @@ def callback_handler(call):
                 
         Thread(target=process_recv, daemon=True).start()
 
-    # ⚠️ FIXED: Correction URL, Payload (-_csrf) & Headers (+Content-Type)
     elif action == "coreg" and mode == "CHAIRMAN":
         bot.answer_callback_query(call.id, "⏳ কারেকশন রেজিস্টার হচ্ছে...")
         
@@ -1544,7 +1548,6 @@ def callback_handler(call):
                 
         Thread(target=process_coreg, daemon=True).start()
 
-    # ⚠️ FIXED: Register Payload format and dynamic date
     elif action == "reg" and mode == "CHAIRMAN":
         bot.answer_callback_query(call.id, "⏳ চেক করা হচ্ছে...")
         
@@ -1638,7 +1641,7 @@ def callback_handler(call):
         bot.answer_callback_query(call.id)
 
 # ==========================================
-# ১২. মেইন রাউটার
+# 12. Main Router
 # ==========================================
 @bot.message_handler(func=lambda m: True)
 def router(m):
@@ -1742,7 +1745,7 @@ def router(m):
     safe_send(cid, "⚠️ আগে লগইন করুন।", reply_markup=generate_main_menu(cid, uid))
 
 # ==========================================
-# ১৩. Flask ও Main
+# 13. Flask & Main
 # ==========================================
 def run_flask():
     app = Flask(__name__)
