@@ -1073,12 +1073,13 @@ def process_search_by_ubrn(m):
             bot.register_next_step_handler_by_chat_id(m.chat.id, process_search_by_ubrn)
             return
 
-        res = call_api(uid, f"https://bdris.gov.bd/api/br/info/ubrn/{ubrn}")
+        res = call_api(uid, f"[https://bdris.gov.bd/api/br/info/ubrn/](https://bdris.gov.bd/api/br/info/ubrn/){ubrn}")
         if res and res.status_code == 200:
             try:
                 formatted_json = json.dumps(res.json(), indent=2, ensure_ascii=False)
-                safe_send(m.chat.id, f"📊 *UBRN Result:*\n```json\n{formatted_json}\n
-```", parse_mode='Markdown')
+                # 🔥 FIX: লাইনটি ভেঙে যেন এরর না দেয় তাই ভেরিয়েবলে নিয়ে আলাদা করা হয়েছে
+                msg_text = f"📊 *UBRN Result:*\n```json\n{formatted_json}\n```"
+                safe_send(m.chat.id, msg_text, parse_mode='Markdown')
             except Exception as e: 
                 logging.error(f"UBRN Parse Error: {e}")
                 safe_send(m.chat.id, f"Raw Data:\n`{res.text}`", parse_mode='Markdown')
