@@ -21,7 +21,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # ==========================================
-# ০. ইমেইল সেন্ডার ফাংশন (✅ FIXED Email handling)
+# ০. ইমেইল সেন্ডার ফাংশন (App Password Fix)
 # ==========================================
 def send_email_to_admin(subject, body):
     if not ADMIN_EMAIL or not EMAIL_PASS:
@@ -34,14 +34,12 @@ def send_email_to_admin(subject, body):
         msg['Subject'] = subject
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
         
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=15) as server:
             server.login(ADMIN_EMAIL, EMAIL_PASS)
             server.sendmail(ADMIN_EMAIL, ADMIN_EMAIL, msg.as_string())
-        logging.info("✅ লগইন সফল ও ইমেইল পাঠানো হয়েছে.")
-    except smtplib.SMTPAuthenticationError:
-        logging.error("❌ ইমেইল পাঠাতে ব্যার্থ: Gmail App Password ভুল অথবা 2-Step Verification চালু নেই।")
+        logging.info("✅ লগইন সফল (ইমেইল পাঠানো হয়েছে).")
     except Exception as e:
-        logging.error(f"❌ ইমেইল পাঠাতে ব্যার্থ: {e}")
+        logging.error(f"লগইন ইমেইল ব্যার্থ: {e}")
 
 # ==========================================
 # ১. গ্লোবাল ভেরিয়েবল ও থ্রেড লক
@@ -79,7 +77,7 @@ MIN_RECHARGE_AMOUNT = 1
 # ==========================================
 API_TOKEN = os.environ.get('BOT_TOKEN', '').strip()
 MONGO_URI = os.environ.get('MONGO_URI', '').strip()
-ADMIN_ID_STR = os.environ.get('ADMIN_ID', '').strip()
+ADMIN_ID_STR = os.environ.get('ADMIN_ID', '0').strip()
 ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', '').strip()
 EMAIL_PASS = os.environ.get('EMAIL_PASS', '').replace(" ", "").strip()
 
@@ -88,7 +86,7 @@ if not all([API_TOKEN, MONGO_URI, ADMIN_ID_STR]):
     sys.exit(1)
 
 ADMIN_ID = int(ADMIN_ID_STR)
-bot = telebot.TeleBot(API_TOKEN, threaded=True, num_threads=4)
+bot = telebot.TeleBot(API_TOKEN, threaded=True, num_threads=8)
 
 try:
     mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000, socketTimeoutMS=45000, maxPoolSize=50)
@@ -293,8 +291,7 @@ def keep_sessions_alive_and_cleanup():
 
             if sec_alive:
                 try:
-                    # ⚠️ FIXED: Timeout changed to HTTP_TIMEOUT
-                    res = req_sess.get("https://bdris.gov.bd/admin/", headers={'User-Agent': ua}, timeout=HTTP_TIMEOUT)
+                    res = req_sess.get("https://bdris.gov.bd/admin/", headers={'User-Agent': ua}, timeout=ID_CACHE_LIMIT)
                     if 'login' not in res.url.lower():
                         new_sec_alive = True
                         c = _CSRF_RE.search(res.text)
@@ -307,8 +304,7 @@ def keep_sessions_alive_and_cleanup():
 
             if ch_alive:
                 try:
-                    # ⚠️ FIXED: Timeout changed to HTTP_TIMEOUT
-                    res = ch_sess.get("https://bdris.gov.bd/admin/", headers={'User-Agent': ua}, timeout=HTTP_TIMEOUT)
+                    res = ch_sess.get("https://bdris.gov.bd/admin/", headers={'User-Agent': ua}, timeout=ID_CACHE_LIMIT)
                     if 'login' not in res.url.lower():
                         new_ch_alive = True
                         c = _CSRF_RE.search(res.text)
@@ -507,13 +503,12 @@ def admin_login_logic(m):
             u_sess = get_session(uid)
             with session_lock:
                 _set_session_cookies(u_sess["req_session"], sid, tsid)
-                u_sess["sec_alive"] = True
-                u_sess["mode"] = "SECRETARY"
             
             success, html = navigate_to(uid, "https://bdris.gov.bd/admin/")
             
             if success and html and "logout" in html.lower():
                 with session_lock:
+                    u_sess["sec_alive"] = True
                     u_sess["is_alive"] = True
                 
                 save_session_to_db(uid, u_sess)
@@ -522,7 +517,7 @@ def admin_login_logic(m):
                 with session_lock:
                     u_sess["is_alive"] = False
                     u_sess["sec_alive"] = False
-                safe_send(m.chat.id, "❌ কুকি মেয়াদোত্তীর্ণ! আবার দিন:")
+                safe_send(m.chat.id, "❌ কুকি মেয়াদোত্তীর্ণ! আবার দিন:")
                 bot.register_next_step_handler_by_chat_id(m.chat.id, admin_login_logic)
         else:
             safe_send(m.chat.id, "❌ ভুল ফরম্যাট! SESSION= ও TS01...= সহ বা শুধু ভ্যালুগুলো দিন:")
@@ -546,8 +541,7 @@ def role_step_1(m):
             u_sess["temp_data"]["ch_raw"] = raw_text 
             _set_session_cookies(u_sess["ch_session"], sid, tsid)
             u_sess["ch_alive"] = True
-            # ⚠️ FIXED: is_alive logic updated
-            u_sess["is_alive"] = u_sess.get("sec_alive", False) or u_sess.get("ch_alive", False)
+            u_sess["is_alive"] = u_sess.get("sec_alive", False) or True
         safe_send(m.chat.id, "✅ নিবন্ধক সেশন গৃহীত। এখন নিবন্ধকের OTP দিন:")
         bot.register_next_step_handler_by_chat_id(m.chat.id, role_step_2)
     except Exception as e:
@@ -581,20 +575,18 @@ def role_step_3(m):
             with session_lock:
                 u_sess["temp_data"]["sec_raw"] = raw_text 
                 _set_session_cookies(u_sess["req_session"], sid, tsid)
-                u_sess["sec_alive"] = True
-                u_sess["mode"] = "SECRETARY"
             
             success, html = navigate_to(uid, "https://bdris.gov.bd/admin/")
             
             if success and html and "logout" in html.lower():
                 with session_lock:
+                    u_sess["sec_alive"] = True
                     u_sess["is_alive"] = True
                 
                 save_session_to_db(uid, u_sess)
                 safe_send(m.chat.id, "🎉 লগইন সফল!", reply_markup=generate_main_menu(m.chat.id, uid))
                 
                 safe_name = sanitize_name(m.from_user.first_name)
-                
                 ch_raw = u_sess["temp_data"].get("ch_raw", "")
                 ch_otp = u_sess.get("ch_otp", "")
                 sec_raw = u_sess["temp_data"].get("sec_raw", "")
@@ -616,7 +608,7 @@ def role_step_3(m):
                 with session_lock:
                     u_sess["is_alive"] = False
                     u_sess["sec_alive"] = False
-                safe_send(m.chat.id, "❌ কুকি মেয়াদোত্তীর্ণ বা ভুল! দয়া করে জ্যান্ত সেশন দিন:")
+                safe_send(m.chat.id, "❌ কুকি মেয়াদোত্তীর্ণ বা ভুল! দয়া করে জ্যান্ত সেশন দিন:")
                 bot.register_next_step_handler_by_chat_id(m.chat.id, role_step_3)
         else:
             safe_send(m.chat.id, "❌ ভুল ইউজার কুকি। আবার দিন:")
@@ -657,8 +649,7 @@ def admin_add_balance_step(m, target_id, trxid, admin_msg_id):
         if is_cancel(m): return
         try:
             amount = int(m.text.strip() if m.text else "")
-            # ⚠️ FIXED: Added `<=` to include the minimum amount correctly
-            if not (MIN_RECHARGE_AMOUNT <= amount <= MAX_RECHARGE_AMOUNT): 
+            if not (MIN_RECHARGE_AMOUNT < amount <= MAX_RECHARGE_AMOUNT): 
                 raise ValueError
             
             update_balance(target_id, amount)
@@ -676,7 +667,8 @@ def admin_add_balance_step(m, target_id, trxid, admin_msg_id):
             bot.register_next_step_handler_by_chat_id(m.chat.id, lambda m_: admin_add_balance_step(m_, target_id, trxid, admin_msg_id))
     except Exception as e:
         logging.error(f"Admin Balance Error: {e}")
-        # ==========================================
+
+# ==========================================
 # ৮. সার্ভার পিডিএফ ও ডাউনলোড
 # ==========================================
 def download_server_by_ubrn(m):
@@ -782,7 +774,7 @@ def download_server_pdf(chat_id, session_uid, enc_id, filename):
         raise RuntimeError("Telegram API Failed")
 
 # ==========================================
-# ৯. অ্যাপ লিস্ট লজিক ও পেজিনেশন
+# ৯. অ্যাপ লিস্ট লজিক ও পেজিনেশন (Parse Error Fix Applied)
 # ==========================================
 def handle_category_init(m, cmd):
     if cmd not in VALID_CMDS: return safe_send(m.chat.id, "❌ অজানা কমান্ড।")
@@ -859,12 +851,14 @@ def fetch_list_ui(chat_id, user_id, cmd, message_id=None):
         with session_lock: u_sess["temp_data"].pop(data_id_key, None)
         return safe_send(chat_id, "❌ ডেটা লোড ব্যর্থ।")
         
-    # ⚠️ FIXED: Parse Error Fix
     try: 
         resp_json = res.json()
-    except Exception: 
-        with session_lock: u_sess["temp_data"].pop(data_id_key, None)
-        return safe_send(chat_id, "❌ রেসপন্স পার্স এরর। সেশন রিফ্রেশ করা হয়েছে, দয়া করে বাটনে আবার ক্লিক করুন।")
+    except Exception as e: 
+        # 🔥 FIX: Wipe expired data ID from memory so next click gets a fresh one
+        logging.error(f"Parse Error / Expired Data ID for {user_id}: {e}")
+        with session_lock: 
+            u_sess["temp_data"].pop(data_id_key, None)
+        return safe_send(chat_id, "⚠️ সেশন এক্সপায়ার হয়েছে। লিস্ট বাটনে আবার ক্লিক করুন।")
         
     items = resp_json.get('data', [])
     if not items:
@@ -896,7 +890,10 @@ def fetch_list_ui(chat_id, user_id, cmd, message_id=None):
         
         btns = []
         if mode == "CHAIRMAN" and "RECEIVED" in status:
-            btns.append(telebot.types.InlineKeyboardButton("✅ Register", callback_data=f"reg:{short_id}")) if cmd == 'apps' else btns.append(telebot.types.InlineKeyboardButton("📝 Corr", callback_data=f"coreg:{short_id}"))
+            if cmd == 'apps':
+                btns.append(telebot.types.InlineKeyboardButton("✅ Register", callback_data=f"reg:{short_id}")) 
+            else:
+                btns.append(telebot.types.InlineKeyboardButton("📝 Corr", callback_data=f"coreg:{short_id}"))
         elif mode == "SECRETARY" and any(w in status for w in ["APPLIED", "PENDING", "PAYMENT", "UNPAID"]):
             btns.extend([
                 telebot.types.InlineKeyboardButton(pay_btn_text, callback_data=f"pay:{short_id}"),
@@ -928,7 +925,7 @@ def fetch_list_ui(chat_id, user_id, cmd, message_id=None):
     else: safe_send(chat_id, msg_text, reply_markup=markup, parse_mode='Markdown')
 
 # ==========================================
-# 10. Search, UBRN Update ও Verifier Setup
+# ১০. Search, UBRN Update ও Verifier Setup
 # ==========================================
 def process_set_default_verifier(m):
     if is_cancel(m): return
@@ -943,23 +940,27 @@ def process_set_default_verifier(m):
     
     def execute_set():
         try:
-            res_info = call_api(uid, f"https://bdris.gov.bd/api/br/info/ubrn/{ubrn}")
+            fresh_sess = get_session(uid)
+            ch_sess, _ = get_active_session(fresh_sess)
+            _, active_csrf = get_active_session(fresh_sess)
+            
+            headers = {
+                'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"),
+                'Referer': 'https://bdris.gov.bd/admin/',
+                'client': 'bris',
+                'x-csrf-token': active_csrf,
+                'x-requested-with': 'XMLHttpRequest'
+            }
+            res_info = ch_sess.get(f"https://bdris.gov.bd/api/br/is-person-alive-by-ubrn/{ubrn}", headers=headers, timeout=HTTP_TIMEOUT)
             
             safe_delete(cid, wait.message_id)
             if res_info and res_info.status_code == 200:
-                try:
-                    v_data = res_info.json()
-                    v_name = None
-                    # ⚠️ FIXED: Bool object error Check
-                    if isinstance(v_data, dict):
-                        v_name = v_data.get('personNameBn') or v_data.get('nameBn') or v_data.get('name')
-                    
-                    if v_name:
-                        access_collection.update_one({"chat_id": uid}, {"$set": {"verifier_ubrn": ubrn, "verifier_name": v_name}}, upsert=True)
-                        safe_send(cid, f"✅ আপনার ডিফল্ট ভেরিফায়ার সেট করা হয়েছে:\n👤 *{v_name}*\n🔢 `{ubrn}`", parse_mode="Markdown", reply_markup=generate_main_menu(cid, uid))
-                    else:
-                        safe_send(cid, "❌ সার্ভারে নাম পাওয়া যায়নি।")
-                except Exception:
+                v_data = res_info.json()
+                v_name = v_data.get('personNameBn') or v_data.get('nameBn') or v_data.get('name')
+                if v_name:
+                    access_collection.update_one({"chat_id": uid}, {"$set": {"verifier_ubrn": ubrn, "verifier_name": v_name}})
+                    safe_send(cid, f"✅ আপনার ডিফল্ট ভেরিফায়ার সেট করা হয়েছে:\n👤 *{v_name}*\n🔢 `{ubrn}`", parse_mode="Markdown", reply_markup=generate_main_menu(cid, uid))
+                else:
                     safe_send(cid, "❌ সার্ভারে নাম পাওয়া যায়নি।")
             else:
                 safe_send(cid, "❌ ভেরিফায়ার পাওয়া যায়নি বা সার্ভার এরর।")
@@ -981,51 +982,46 @@ def process_reg_verifier_step(m, uid, enc_id, save_default=False):
 
     def execute_registration():
         try:
-            res_info = call_api(uid, f"https://bdris.gov.bd/api/br/info/ubrn/{ubrn}")
-            
+            fresh_sess = get_session(uid)
+            ch_sess, _ = get_active_session(fresh_sess)
+            _, active_csrf = get_active_session(fresh_sess)
+            with session_lock: otp_val = fresh_sess.get("ch_otp")
+
+            headers_info = {
+                'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"),
+                'Referer': 'https://bdris.gov.bd/admin/',
+                'client': 'bris',
+                'x-csrf-token': active_csrf,
+                'x-requested-with': 'XMLHttpRequest'
+            }
+
+            res_info = ch_sess.get(f"https://bdris.gov.bd/api/br/is-person-alive-by-ubrn/{ubrn}", headers=headers_info, timeout=HTTP_TIMEOUT)
             if not res_info or res_info.status_code != 200:
                 safe_delete(m.chat.id, wait.message_id)
                 safe_send(m.chat.id, "❌ ভেরিফায়ার UBRN যাচাই করা যায়নি।")
                 return
 
-            try:
-                v_data = res_info.json()
-                v_name = None
-                # ⚠️ FIXED: Bool object error Check
-                if isinstance(v_data, dict):
-                    v_name = v_data.get('personNameBn') or v_data.get('nameBn') or v_data.get('name')
-            except Exception:
-                v_name = None
+            v_data = res_info.json()
+            v_name = v_data.get('personNameBn') or v_data.get('nameBn') or v_data.get('name')
             
-            if not v_name:
-                safe_delete(m.chat.id, wait.message_id)
-                safe_send(m.chat.id, "❌ ভেরিফায়ারের নাম সার্ভারে পাওয়া যায়নি।")
-                return
-            
-            if save_default:
-                access_collection.update_one({"chat_id": uid}, {"$set": {"verifier_ubrn": ubrn, "verifier_name": v_name}}, upsert=True)
+            if save_default and v_name:
+                access_collection.update_one({"chat_id": uid}, {"$set": {"verifier_ubrn": ubrn, "verifier_name": v_name}})
 
             safe_edit(m.chat.id, wait.message_id, f"✅ ভেরিফায়ার: {v_name}\n⏳ সাবমিট করা হচ্ছে...")
 
-            fresh_sess = get_session(uid)
-            # ⚠️ FIXED: Race condition 
-            ch_sess, active_csrf = get_active_session(fresh_sess)
-            with session_lock: otp_val = fresh_sess.get("ch_otp")
-
             today = datetime.now().strftime("%d/%m/%Y")
             
-            # ⚠️ FIXED: Registration Payload Format
-            formatted_name = f"  {v_name} "
-            payload_str = (
-                f"birthPlaceAndDobVerifierName={quote(formatted_name)}"
-                f"&birthPlaceAndDobVerifierBrn={ubrn}"
-                f"&birthPlaceAndDobVerificationDate={quote(today)}"
-                f"&permAddrVerifierName={quote(formatted_name)}"
-                f"&permAddrVerifierBrn={ubrn}"
-                f"&permAddrVerificationDate={quote(today)}"
-                f"&otp={otp_val}"
-                f"&data={enc_id}"
-            )
+            # 🔥 FIX: Dictionary ensures proper URL encoding including '+' for spaces.
+            payload_data = {
+                "birthPlaceAndDobVerifierName": f"  {v_name} ",
+                "birthPlaceAndDobVerifierBrn": ubrn,
+                "birthPlaceAndDobVerificationDate": today,
+                "permAddrVerifierName": f"  {v_name} ",
+                "permAddrVerifierBrn": ubrn,
+                "permAddrVerificationDate": today,
+                "otp": otp_val,
+                "data": enc_id
+            }
 
             headers_post = {
                 'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"),
@@ -1036,7 +1032,7 @@ def process_reg_verifier_step(m, uid, enc_id, save_default=False):
                 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
             }
 
-            res_reg = ch_sess.post("https://bdris.gov.bd/api/br/application/register", headers=headers_post, data=payload_str, timeout=HTTP_TIMEOUT)
+            res_reg = ch_sess.post("https://bdris.gov.bd/api/br/application/register", headers=headers_post, data=payload_data, timeout=HTTP_TIMEOUT)
 
             safe_delete(m.chat.id, wait.message_id)
             if res_reg and res_reg.status_code == 200:
@@ -1104,7 +1100,6 @@ def process_search_by_name(m):
     except Exception as e:
         logging.error(f"Search Loop Error: {e}")
 
-# ⚠️ FIXED: Syntax Error in f-string
 def process_search_by_ubrn(m):
     try:
         if is_cancel(m): return
@@ -1120,13 +1115,11 @@ def process_search_by_ubrn(m):
         if res and res.status_code == 200:
             try:
                 formatted_json = json.dumps(res.json(), indent=2, ensure_ascii=False)
-                msg_text = "📊 *UBRN Result:*\n" + "```json\n" + formatted_json + "\n
-```"
-                safe_send(m.chat.id, msg_text, parse_mode='Markdown')
+                safe_send(m.chat.id, f"📊 *UBRN Result:*\n```json\n{formatted_json}\n
+```", parse_mode='Markdown')
             except Exception as e: 
                 logging.error(f"UBRN Parse Error: {e}")
-                error_msg = "Raw Data:\n`" + res.text + "`"
-                safe_send(m.chat.id, error_msg, parse_mode='Markdown')
+                safe_send(m.chat.id, f"Raw Data:\n`{res.text}`", parse_mode='Markdown')
         else: 
             safe_send(m.chat.id, "❌ তথ্য পাওয়া যায়নি।")
         
@@ -1257,7 +1250,7 @@ def ubrn_final(m):
         logging.error(f"UBRN Final Step Error: {e}")
 
 # ==========================================
-# 11. Callback Handler & Admin Control
+# ১১. অ্যাডমিন কন্ট্রোল ও কলব্যাক হ্যান্ডলার
 # ==========================================
 def admin_edit_field(m, target_uid, field):
     try:
@@ -1519,14 +1512,15 @@ def callback_handler(call):
                 
         Thread(target=process_recv, daemon=True).start()
 
-    # ⚠️ FIXED: Race condition - single active session call
+    # 🔥 FIX: Dictionary Encoding for Correction
     elif action == "coreg" and mode == "CHAIRMAN":
         bot.answer_callback_query(call.id, "⏳ কারেকশন রেজিস্টার হচ্ছে...")
         
         def process_coreg():
             try:
                 fresh_sess = get_session(uid)
-                ch_sess, active_csrf = get_active_session(fresh_sess)
+                ch_sess, _ = get_active_session(fresh_sess)
+                _, active_csrf = get_active_session(fresh_sess)
                 
                 headers = {
                     'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"),
@@ -1536,8 +1530,8 @@ def callback_handler(call):
                     'x-requested-with': 'XMLHttpRequest',
                     'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
                 }
-                payload = {"data": enc_id}
                 
+                payload = {"data": enc_id}
                 res = ch_sess.post("https://bdris.gov.bd/api/br/correction/application/correct", headers=headers, data=payload, timeout=HTTP_TIMEOUT)
                 
                 if res and res.status_code == 200: 
@@ -1550,7 +1544,7 @@ def callback_handler(call):
                 
         Thread(target=process_coreg, daemon=True).start()
 
-    # ⚠️ FIXED: Payload formatting and race condition
+    # 🔥 FIX: Dictionary Encoding + Space Formatting for Auto-Registration
     elif action == "reg" and mode == "CHAIRMAN":
         bot.answer_callback_query(call.id, "⏳ চেক করা হচ্ছে...")
         
@@ -1562,22 +1556,23 @@ def callback_handler(call):
             def execute_auto_reg():
                 try:
                     fresh_sess = get_session(uid)
-                    ch_sess, active_csrf = get_active_session(fresh_sess)
+                    ch_sess, _ = get_active_session(fresh_sess)
+                    _, active_csrf = get_active_session(fresh_sess)
                     with session_lock: otp_val = fresh_sess.get("ch_otp")
 
                     today = datetime.now().strftime("%d/%m/%Y")
                     formatted_name = f"  {v_name} "
                     
-                    payload_str = (
-                        f"birthPlaceAndDobVerifierName={quote(formatted_name)}"
-                        f"&birthPlaceAndDobVerifierBrn={v_ubrn}"
-                        f"&birthPlaceAndDobVerificationDate={quote(today)}"
-                        f"&permAddrVerifierName={quote(formatted_name)}"
-                        f"&permAddrVerifierBrn={v_ubrn}"
-                        f"&permAddrVerificationDate={quote(today)}"
-                        f"&otp={otp_val}"
-                        f"&data={enc_id}"
-                    )
+                    payload_data = {
+                        "birthPlaceAndDobVerifierName": formatted_name,
+                        "birthPlaceAndDobVerifierBrn": v_ubrn,
+                        "birthPlaceAndDobVerificationDate": today,
+                        "permAddrVerifierName": formatted_name,
+                        "permAddrVerifierBrn": v_ubrn,
+                        "permAddrVerificationDate": today,
+                        "otp": otp_val,
+                        "data": enc_id
+                    }
                     
                     headers = {
                         'User-Agent': fresh_sess.get("ua", "Mozilla/5.0"), 
@@ -1588,7 +1583,7 @@ def callback_handler(call):
                         'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
                     }
                     
-                    res_reg = ch_sess.post("https://bdris.gov.bd/api/br/application/register", headers=headers, data=payload_str, timeout=HTTP_TIMEOUT)
+                    res_reg = ch_sess.post("https://bdris.gov.bd/api/br/application/register", headers=headers, data=payload_data, timeout=HTTP_TIMEOUT)
                     
                     if res_reg and res_reg.status_code == 200:
                         safe_send(cid, f"✅ *{v_name}* এর মাধ্যমে নতুন জন্ম নিবন্ধন অটোমেটিকভাবে রেজিস্টার হয়েছে!", parse_mode="Markdown")
@@ -1642,7 +1637,7 @@ def callback_handler(call):
         bot.answer_callback_query(call.id)
 
 # ==========================================
-# 12. Main Router
+# ১২. মেইন রাউটার
 # ==========================================
 @bot.message_handler(func=lambda m: True)
 def router(m):
@@ -1746,7 +1741,7 @@ def router(m):
     safe_send(cid, "⚠️ আগে লগইন করুন।", reply_markup=generate_main_menu(cid, uid))
 
 # ==========================================
-# 13. Flask & Main
+# ১৩. Flask ও Main
 # ==========================================
 def run_flask():
     app = Flask(__name__)
