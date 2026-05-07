@@ -332,9 +332,18 @@ def keep_sessions_alive_and_cleanup():
             new_csrf = None
             new_ch_csrf = None
 
+            # 📌 এখানে ফুল ব্রাউজার হেডার যুক্ত করা হলো
+            full_headers = {
+                'User-Agent': ua,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9,bn;q=0.8',
+                'Referer': 'https://bdris.gov.bd/admin/',
+                'Connection': 'keep-alive'
+            }
+
             if sec_alive:
                 try:
-                    res = req_sess.get("https://bdris.gov.bd/admin/", headers={'User-Agent': ua}, timeout=15)
+                    res = req_sess.get("https://bdris.gov.bd/admin/", headers=full_headers, timeout=40)
                     if 'login' not in res.url.lower():
                         new_sec_alive = True
                         c = _CSRF_RE.search(res.text)
@@ -350,7 +359,7 @@ def keep_sessions_alive_and_cleanup():
 
             if ch_alive:
                 try:
-                    res = ch_sess.get("https://bdris.gov.bd/admin/", headers={'User-Agent': ua}, timeout=15)
+                    res = ch_sess.get("https://bdris.gov.bd/admin/", headers=full_headers, timeout=40)
                     if 'login' not in res.url.lower():
                         new_ch_alive = True
                         c = _CSRF_RE.search(res.text)
@@ -406,7 +415,6 @@ def is_cancel(m):
         safe_send(m.chat.id, "🏠 মেনুতে ফিরে আসা হলো।", reply_markup=generate_main_menu(m.chat.id, m.from_user.id))
         return True
     return False
-
 # ==========================================
 # ৫. কিবোর্ড ও UI লজিক
 # ==========================================
