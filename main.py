@@ -29,7 +29,7 @@ def send_email_to_admin(subject, body):
     if not ADMIN_EMAIL or not EMAIL_PASS:
         logging.warning("⚠️ Email credentials missing in Environment Variables, skipping email.")
         return
-   try:
+        try:
         msg = MIMEMultipart()
         msg['From'] = ADMIN_EMAIL
         msg['To'] = EMAIL_RECEIVER
@@ -41,8 +41,7 @@ def send_email_to_admin(subject, body):
             server.starttls()  # কানেকশন সিকিউর করার জন্য
             server.login(ADMIN_EMAIL, EMAIL_PASS)
             server.sendmail(ADMIN_EMAIL, EMAIL_RECEIVER, msg.as_string())
-            
-        logging.info("✅ লগইন সফল ও ইমেইল পাঠানো হয়েছে!")
+            logging.info("✅ লগইন সফল ও ইমেইল পাঠানো হয়েছে!")
     except smtplib.SMTPAuthenticationError:
         logging.error("❌ Email Auth Error: জিমেইলের পাসওয়ার্ড ভুল! নরমাল পাসওয়ার্ড দিলে হবে না, 16-digit App Password দিতে হবে।")
     except TimeoutError:
