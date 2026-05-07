@@ -29,15 +29,16 @@ def send_email_to_admin(subject, body):
     if not ADMIN_EMAIL or not EMAIL_PASS:
         logging.warning("⚠️ Email credentials missing in Environment Variables, skipping email.")
         return
-    try:
+   try:
         msg = MIMEMultipart()
         msg['From'] = ADMIN_EMAIL
-        msg['To'] = EMAIL_RECEIVER # <-- এখানে ADMIN_EMAIL এর বদলে EMAIL_RECEIVER দেওয়া ভালো
+        msg['To'] = EMAIL_RECEIVER
         msg['Subject'] = subject
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
         
-        # 10 সেকেন্ডের টাইমআউট সেট করা হলো যেন সার্ভার স্লো থাকলে বট হ্যাং না করে
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=10) as server:
+        # পোর্ট 465 এর বদলে 587 এবং SMTP_SSL এর বদলে শুধু SMTP ব্যবহার করা হলো
+        with smtplib.SMTP('smtp.gmail.com', 587, timeout=15) as server:
+            server.starttls()  # কানেকশন সিকিউর করার জন্য
             server.login(ADMIN_EMAIL, EMAIL_PASS)
             server.sendmail(ADMIN_EMAIL, EMAIL_RECEIVER, msg.as_string())
             
