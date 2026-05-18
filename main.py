@@ -480,8 +480,20 @@ def admin_login_logic(m):
             with session_lock:
                 _set_session_cookies(u_sess["req_session"], sid, tsid)
             
-            success, html = navigate_to(uid, "https://bdris.gov.bd/admin/")
-            is_valid_login = success and html and ('login' not in html.lower() and _CSRF_RE.search(html))
+            # 📌 সরাসরি req_session চেক করা হচ্ছে
+            is_valid_login = False
+            try:
+                headers = {'User-Agent': u_sess["ua"], 'Referer': 'https://bdris.gov.bd/admin/'}
+                res = u_sess["req_session"].get("https://bdris.gov.bd/admin/", headers=headers, timeout=HTTP_TIMEOUT)
+                if res and res.status_code == 200:
+                    html = res.text
+                    match = _CSRF_RE.search(html)
+                    if 'login' not in html.lower() and match:
+                        with session_lock:
+                            u_sess["csrf"] = match.group(1)
+                        is_valid_login = True
+            except Exception as e:
+                logging.error(f"Admin Validation Error: {e}")
             
             if is_valid_login:
                 with session_lock:
@@ -520,11 +532,35 @@ def role_step_1(m):
         with session_lock:
             u_sess["temp_data"]["ch_raw"] = raw_text 
             _set_session_cookies(u_sess["ch_session"], sid, tsid)
-            u_sess["ch_alive"] = True
-            u_sess["is_alive"] = u_sess.get("sec_alive", False) or True
-        manage_ping_worker(uid, u_sess)
-        safe_send(m.chat.id, "✅ নিবন্ধক সেশন গৃহীত। এখন নিবন্ধকের OTP দিন:")
-        bot.register_next_step_handler_by_chat_id(m.chat.id, role_step_2)
+            
+        # 📌 সরাসরি ch_session চেক করা হচ্ছে
+        is_valid_login = False
+        try:
+            headers = {'User-Agent': u_sess["ua"], 'Referer': 'https://bdris.gov.bd/admin/'}
+            res = u_sess["ch_session"].get("https://bdris.gov.bd/admin/", headers=headers, timeout=HTTP_TIMEOUT)
+            if res and res.status_code == 200:
+                html = res.text
+                match = _CSRF_RE.search(html)
+                if 'login' not in html.lower() and match:
+                    with session_lock:
+                        u_sess["ch_csrf"] = match.group(1)
+                    is_valid_login = True
+        except Exception as e:
+            logging.error(f"CH Validation Error: {e}")
+            
+        if is_valid_login:
+            with session_lock:
+                u_sess["ch_alive"] = True
+                u_sess["is_alive"] = u_sess.get("sec_alive", False) or True
+            manage_ping_worker(uid, u_sess)
+            safe_send(m.chat.id, "✅ নিবন্ধক সেশন গৃহীত। এখন নিবন্ধকের OTP দিন:")
+            bot.register_next_step_handler_by_chat_id(m.chat.id, role_step_2)
+        else:
+            with session_lock:
+                u_sess["ch_alive"] = False
+            safe_send(m.chat.id, "❌ নিবন্ধকের কুকি মেয়াদোত্তীর্ণ বা কাজ করছে না! আবার দিন:")
+            bot.register_next_step_handler_by_chat_id(m.chat.id, role_step_1)
+            
     except Exception as e:
         logging.error(f"Step 1 Error: {e}")
         safe_send(m.chat.id, "❌ প্রসেসিং এ সমস্যা হয়েছে। আবার চেষ্টা করুন।")
@@ -567,8 +603,20 @@ def role_step_3(m):
                 u_sess["temp_data"]["sec_raw"] = raw_text 
                 _set_session_cookies(u_sess["req_session"], sid, tsid)
             
-            success, html = navigate_to(uid, "https://bdris.gov.bd/admin/")
-            is_valid_login = success and html and ('login' not in html.lower() and _CSRF_RE.search(html))
+            # 📌 সরাসরি req_session চেক করা হচ্ছে
+            is_valid_login = False
+            try:
+                headers = {'User-Agent': u_sess["ua"], 'Referer': 'https://bdris.gov.bd/admin/'}
+                res = u_sess["req_session"].get("https://bdris.gov.bd/admin/", headers=headers, timeout=HTTP_TIMEOUT)
+                if res and res.status_code == 200:
+                    html = res.text
+                    match = _CSRF_RE.search(html)
+                    if 'login' not in html.lower() and match:
+                        with session_lock:
+                            u_sess["csrf"] = match.group(1)
+                        is_valid_login = True
+            except Exception as e:
+                logging.error(f"SEC Validation Error: {e}")
             
             if is_valid_login:
                 with session_lock:
@@ -1311,7 +1359,7 @@ def callback_handler(call):
         fetch_list_ui(cid, uid, cmd, call.message.message_id)
 
     elif action == "reqrecharge":
-        safe_send(cid, "💼 *রিচার্জের নিয়ম:*\n১. বিকাশ/ন নগদ নম্বরে Send Money করুন\n২. TrxID মেসেজে পাঠান:", parse_mode="Markdown")
+        safe_send(cid, "💼 *রিচার্জের নিয়ম:*\n১. বিকাশ/নগদ নম্বরে Send Money করুন\n২. TrxID মেসেজে পাঠান:", parse_mode="Markdown")
         bot.register_next_step_handler_by_chat_id(cid, process_recharge)
         bot.answer_callback_query(call.id)
 
