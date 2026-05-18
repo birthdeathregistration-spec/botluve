@@ -1075,8 +1075,7 @@ def process_search_by_ubrn(m):
         if res and res.status_code == 200:
             try:
                 formatted_json = json.dumps(res.json(), indent=2, ensure_ascii=False)
-                msg_text = f"📊 *UBRN Result:*\n```json\n{formatted_json}\n
-```"
+                msg_text = f"📊 *UBRN Result:*\n```json\n{formatted_json}\n```"
                 safe_send(m.chat.id, msg_text, parse_mode='Markdown')
             except Exception as e: 
                 logging.error(f"UBRN Parse Error: {e}")
