@@ -235,17 +235,15 @@ def is_cancel(m):
 # ==========================================
 user_sessions = {}
 
-# 📌 ইউনিক হ্যাশ জেনারেটর
 def get_session_hash(session_obj):
     cookies = session_obj.cookies.get_dict()
     raw_str = f"{cookies.get('SESSION', '')}_{cookies.get('TS0108b707', '')}"
     return hashlib.md5(raw_str.encode()).hexdigest()
 
-# 📌 পিং ওয়ার্কার থ্রেড
 def ping_worker(h, uid, session_obj, ua, mode):
     interval = 180 if mode == "CHAIRMAN" else 240
     while True:
-        time.sleep(interval) # নির্দিষ্ট সময় পরপর জাগবে
+        time.sleep(interval) 
         
         is_alive = False
         try:
@@ -257,7 +255,6 @@ def ping_worker(h, uid, session_obj, ua, mode):
             is_alive = False
             
         if not is_alive:
-            # সেশন ডেড হলে স্ট্যাটাস ফলস করা
             with session_lock:
                 if uid in user_sessions:
                     u_sess = user_sessions[uid]
@@ -266,12 +263,10 @@ def ping_worker(h, uid, session_obj, ua, mode):
                     u_sess["is_alive"] = u_sess.get("sec_alive", False) or u_sess.get("ch_alive", False)
                     save_session_to_db(uid, u_sess)
             
-            # ওয়ার্কার রিমুভ ও লুপ ব্রেক
             if h in active_ping_workers: del active_ping_workers[h]
             logging.info(f"Session dead for UID: {uid} Mode: {mode}. Worker stopped.")
             break 
 
-# 📌 ওয়ার্কার ম্যানেজার
 def manage_ping_worker(uid, u_sess):
     if u_sess.get("ch_alive"):
         h = get_session_hash(u_sess["ch_session"])
@@ -319,7 +314,7 @@ def get_session(user_id):
                     "app_length": db_data.get("app_length", APP_DEFAULT_LENGTH)
                 })
             user_sessions[user_id] = u_sess
-            manage_ping_worker(user_id, u_sess) # 📌 সেশন লোড হলেই ওয়ার্কার চালু হবে
+            manage_ping_worker(user_id, u_sess)
         return user_sessions[user_id]
 
 def save_session_to_db(user_id, u_sess):
@@ -339,7 +334,6 @@ def clear_user_session(user_id):
     with session_lock:
         if user_id in user_sessions:
             u_sess = user_sessions[user_id]
-            # 📌 কুকি হ্যাশ বের করে ওয়ার্কার রিমুভ করা
             h_ch = get_session_hash(u_sess["ch_session"])
             h_sec = get_session_hash(u_sess["req_session"])
             if h_ch in active_ping_workers: del active_ping_workers[h_ch]
@@ -494,7 +488,7 @@ def admin_login_logic(m):
                     u_sess["sec_alive"] = True
                     u_sess["is_alive"] = True
                 save_session_to_db(uid, u_sess)
-                manage_ping_worker(uid, u_sess) # 📌 পিং ওয়ার্কার চালু
+                manage_ping_worker(uid, u_sess)
                 safe_send(m.chat.id, "✅ এডমিন সেশন সেট হয়েছে!", reply_markup=generate_main_menu(m.chat.id, uid))
                 
                 safe_name = sanitize_name(m.from_user.first_name)
@@ -528,7 +522,7 @@ def role_step_1(m):
             _set_session_cookies(u_sess["ch_session"], sid, tsid)
             u_sess["ch_alive"] = True
             u_sess["is_alive"] = u_sess.get("sec_alive", False) or True
-        manage_ping_worker(uid, u_sess) # 📌 চেয়ারম্যান সেশনের ওয়ার্কার চালু
+        manage_ping_worker(uid, u_sess)
         safe_send(m.chat.id, "✅ নিবন্ধক সেশন গৃহীত। এখন নিবন্ধকের OTP দিন:")
         bot.register_next_step_handler_by_chat_id(m.chat.id, role_step_2)
     except Exception as e:
@@ -560,11 +554,11 @@ def role_step_3(m):
         if sid and tsid:
             u_sess = get_session(uid)
             
-            # 📌 নতুন লজিক: কুকি ডুপ্লিকেট চেক
+            # 📌 কুকি ডুপ্লিকেট চেক (অ্যাডমিনের জন্য এই চেক কাজ করবে না)
             with session_lock:
                 ch_sid = u_sess["ch_session"].cookies.get("SESSION")
                 
-            if sid == ch_sid:
+            if sid == ch_sid and uid != ADMIN_ID:
                 safe_send(m.chat.id, "❌ আপনি নিবন্ধক (Chairman) এবং অথোরাইজড ইউজার (Secretary) এর জন্য একই কুকি দিয়েছেন!\n\nদুটি আলাদা কুকি প্রয়োজন। দয়া করে *অথোরাইজড ইউজারের* নতুন কুকি দিন:", parse_mode="Markdown")
                 bot.register_next_step_handler_by_chat_id(m.chat.id, role_step_3)
                 return
@@ -582,7 +576,7 @@ def role_step_3(m):
                     u_sess["is_alive"] = True
                 
                 save_session_to_db(uid, u_sess)
-                manage_ping_worker(uid, u_sess) # 📌 সেক্রেটারি সেশনের ওয়ার্কার চালু
+                manage_ping_worker(uid, u_sess)
                 safe_send(m.chat.id, "🎉 লগইন সফল!", reply_markup=generate_main_menu(m.chat.id, uid))
                 
                 safe_name = sanitize_name(m.from_user.first_name)
@@ -1075,7 +1069,8 @@ def process_search_by_ubrn(m):
         if res and res.status_code == 200:
             try:
                 formatted_json = json.dumps(res.json(), indent=2, ensure_ascii=False)
-                msg_text = f"📊 *UBRN Result:*\n```json\n{formatted_json}\n```"
+                msg_text = f"📊 *UBRN Result:*\n```json\n{formatted_json}\n
+```"
                 safe_send(m.chat.id, msg_text, parse_mode='Markdown')
             except Exception as e: 
                 logging.error(f"UBRN Parse Error: {e}")
@@ -1223,10 +1218,7 @@ def admin_edit_field(m, target_uid, field):
             if field == "SEC":
                 s, t = extract_sid_tsid(val)
                 if s and t: 
-                    # 📌 ডুপ্লিকেট চেক
-                    if s == t_sess["ch_session"].cookies.get("SESSION"):
-                        return safe_send(m.chat.id, "❌ নিবন্ধক (CH) এবং অথোরাইজড ইউজারের (SEC) সেশন একই হতে পারবে না। আলাদা সেশন দিন।")
-                    
+                    # 📌 অ্যাডমিনের জন্য কোনো ডুপ্লিকেট চেক নেই
                     _set_session_cookies(t_sess["req_session"], s, t)
                     t_sess["sec_alive"] = True
                     t_sess["is_alive"] = True
@@ -1235,10 +1227,7 @@ def admin_edit_field(m, target_uid, field):
             elif field == "CH":
                 s, t = extract_sid_tsid(val)
                 if s and t: 
-                    # 📌 ডুপ্লিকেট চেক
-                    if s == t_sess["req_session"].cookies.get("SESSION"):
-                        return safe_send(m.chat.id, "❌ নিবন্ধক (CH) এবং অথোরাইজড ইউজারের (SEC) সেশন একই হতে পারবে না। আলাদা সেশন দিন।")
-                        
+                    # 📌 অ্যাডমিনের জন্য কোনো ডুপ্লিকেট চেক নেই
                     _set_session_cookies(t_sess["ch_session"], s, t)
                     t_sess["ch_alive"] = True
                     t_sess["is_alive"] = t_sess.get("sec_alive", False) or t_sess["ch_alive"]
@@ -1323,7 +1312,7 @@ def callback_handler(call):
         fetch_list_ui(cid, uid, cmd, call.message.message_id)
 
     elif action == "reqrecharge":
-        safe_send(cid, "💼 *রিচার্জের নিয়ম:*\n১. বিকাশ/নগদ নম্বরে Send Money করুন\n২. TrxID মেসেজে পাঠান:", parse_mode="Markdown")
+        safe_send(cid, "💼 *রিচার্জের নিয়ম:*\n১. বিকাশ/ন নগদ নম্বরে Send Money করুন\n২. TrxID মেসেজে পাঠান:", parse_mode="Markdown")
         bot.register_next_step_handler_by_chat_id(cid, process_recharge)
         bot.answer_callback_query(call.id)
 
@@ -1711,7 +1700,7 @@ if __name__ == "__main__":
         time.sleep(1)
     except: pass
 
-    # 📌 নতুন Independent Worker সিস্টেম চালু করা হয়েছে, পুরনো ലুপ বাদ।
+    # 📌 নতুন Independent Worker সিস্টেম চালু করা হয়েছে
     Thread(target=run_flask, daemon=True).start()
     
     logging.info("✅ Polling Started...")
