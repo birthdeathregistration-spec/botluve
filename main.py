@@ -480,7 +480,7 @@ def admin_login_logic(m):
             with session_lock:
                 _set_session_cookies(u_sess["req_session"], sid, tsid)
             
-            # 📌 সরাসরি req_session চেক করা হচ্ছে
+            # 📌 অ্যাডমিনের লজিক আগের মতোই রাখা হলো (html.lower())
             is_valid_login = False
             try:
                 headers = {'User-Agent': u_sess["ua"], 'Referer': 'https://bdris.gov.bd/admin/'}
@@ -541,7 +541,8 @@ def role_step_1(m):
             if res and res.status_code == 200:
                 html = res.text
                 match = _CSRF_RE.search(html)
-                if 'login' not in html.lower() and match:
+                # 📌 ফিক্স: res.url.lower() ব্যবহার করা হয়েছে
+                if 'login' not in res.url.lower() and match:
                     with session_lock:
                         u_sess["ch_csrf"] = match.group(1)
                     is_valid_login = True
@@ -590,7 +591,7 @@ def role_step_3(m):
         if sid and tsid:
             u_sess = get_session(uid)
             
-            # 📌 কুকি ডুপ্লিকেট চেক (অ্যাডমিনের জন্য এই চেক কাজ করবে না)
+            # 📌 কুকি ডুপ্লিকেট চেক
             with session_lock:
                 ch_sid = u_sess["ch_session"].cookies.get("SESSION")
                 
@@ -611,7 +612,8 @@ def role_step_3(m):
                 if res and res.status_code == 200:
                     html = res.text
                     match = _CSRF_RE.search(html)
-                    if 'login' not in html.lower() and match:
+                    # 📌 ফিক্স: res.url.lower() ব্যবহার করা হয়েছে
+                    if 'login' not in res.url.lower() and match:
                         with session_lock:
                             u_sess["csrf"] = match.group(1)
                         is_valid_login = True
@@ -1117,7 +1119,8 @@ def process_search_by_ubrn(m):
         if res and res.status_code == 200:
             try:
                 formatted_json = json.dumps(res.json(), indent=2, ensure_ascii=False)
-                msg_text = f"📊 *UBRN Result:*\n```json\n{formatted_json}\n```"
+                msg_text = f"📊 *UBRN Result:*\n```json\n{formatted_json}\n
+```"
                 safe_send(m.chat.id, msg_text, parse_mode='Markdown')
             except Exception as e: 
                 logging.error(f"UBRN Parse Error: {e}")
@@ -1285,7 +1288,7 @@ def admin_edit_field(m, target_uid, field):
                 t_sess["ch_otp"] = val
 
         save_session_to_db(target_uid, t_sess)
-        manage_ping_worker(target_uid, t_sess) # 📌 ওয়ার্কার আপডেট করা
+        manage_ping_worker(target_uid, t_sess) # 📌 ওয়ার্কার আপডেট করা
         safe_send(m.chat.id, f"✅ User {target_uid} এর {field} আপডেট হয়েছে!")
     except Exception as e:
         logging.error(f"Admin Edit Error: {e}")
@@ -1747,7 +1750,7 @@ if __name__ == "__main__":
         time.sleep(1)
     except: pass
 
-    # 📌 নতুন Independent Worker সিস্টেম চালু করা হয়েছে
+    # 📌 নতুন Independent Worker সিস্টেম চালু করা হয়েছে
     Thread(target=run_flask, daemon=True).start()
     
     logging.info("✅ Polling Started...")
